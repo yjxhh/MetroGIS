@@ -2,22 +2,29 @@ import platform
 import sys
 
 from . import __version__
+from .logger import get_logger
 
 
 def doctor():
 
-    print("=" * 40)
+    logger = get_logger()
 
-    print(" MetroGIS Environment Doctor")
+    logger.info(
+        "MetroGIS Environment Doctor"
+    )
 
-    print("=" * 40)
+    logger.info(
+        f"Version: {__version__}"
+    )
 
-    print(f"Version : {__version__}")
+    logger.info(
+        f"Python: {sys.version.split()[0]}"
+    )
 
-    print(f"Python  : {sys.version.split()[0]}")
+    logger.info(
+        f"OS: {platform.system()}"
+    )
 
-    print(f"OS      : {platform.system()}")
-
-    print()
-
-    print("Status  : READY")
+    logger.info(
+        "Environment check passed"
+    )
