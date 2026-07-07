@@ -1,0 +1,13 @@
+project:
+  name: MetroGIS
+  version: 0.1.1
+
+geometry:
+  interpolate_distance: 50
+
+osm:
+  timeout: 60
+  endpoint: "https://overpass-api.de/api/interpreter"
+
+export:
+  default_format: "xlsx"

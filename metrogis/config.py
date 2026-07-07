@@ -1,11 +1,28 @@
 from pathlib import Path
+import yaml
 
-ROOT = Path(__file__).resolve().parent.parent
 
-CACHE_DIR = ROOT / "cache"
+BASE_DIR = Path(__file__).resolve().parent
 
-LOG_DIR = ROOT / "logs"
+CONFIG_FILE = BASE_DIR / "resources" / "default.yaml"
 
-CACHE_DIR.mkdir(exist_ok=True)
 
-LOG_DIR.mkdir(exist_ok=True)
+class Config:
+
+    def __init__(self):
+
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            self.data = yaml.safe_load(f)
+
+
+    def get(self, *keys):
+
+        value = self.data
+
+        for key in keys:
+            value = value[key]
+
+        return value
+
+
+settings = Config()
