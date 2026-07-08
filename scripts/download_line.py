@@ -20,6 +20,38 @@ from metrogis.exporter.geojson import (
 )
 
 
+def remove_duplicate_stations(line):
+
+    """
+    去除上下行重复站点
+    保留第一次出现顺序
+    """
+
+    seen = set()
+
+    result = []
+
+
+    for station in line.stations:
+
+        key = station.name
+
+
+        if key not in seen:
+
+            seen.add(key)
+
+            result.append(
+                station
+            )
+
+
+    line.stations = result
+
+
+    return line
+
+
 
 def main():
 
@@ -29,17 +61,14 @@ def main():
     )
 
 
-
     data = search_metro_line(
-        "13"
+        "大连地铁13号线"
     )
-
 
 
     print(
         "Parse OSM data..."
     )
-
 
 
     line = parse_osm_subway(
@@ -48,12 +77,21 @@ def main():
     )
 
 
+    print(
+        "Before stations:",
+        len(line.stations)
+    )
+
+
+    line = remove_duplicate_stations(
+        line
+    )
+
 
     print(
         "Line:",
         line.name
     )
-
 
 
     print(
@@ -62,18 +100,15 @@ def main():
     )
 
 
-
     print(
         "Geometry points:",
         len(line.geometry)
     )
 
 
-
     geojson = subway_to_geojson(
         line
     )
-
 
 
     save_geojson(
@@ -85,11 +120,9 @@ def main():
     )
 
 
-
     print(
         "Done: data/dalian_line13.geojson"
     )
-
 
 
 
