@@ -1,15 +1,15 @@
 """
 导出指定区间线路轨迹 Excel
 
-大医三院 -> 九里
+九里 -> 大医三院
 
 每50米一个点
 
 运行:
 
 python -m scripts.export_track
-
 """
+
 
 import json
 
@@ -28,12 +28,14 @@ from openpyxl import Workbook
 
 INPUT = "data/dalian_line13.geojson"
 
-OUTPUT = "data/dayi_sanyuan_to_jiuli.xlsx"
+
+OUTPUT = "data/13号线#1.xlsx"
 
 
-START = "大医三院"
+START = "九里"
 
-END = "九里"
+
+END = "大医三院"
 
 
 DISTANCE = 50
@@ -41,7 +43,6 @@ DISTANCE = 50
 
 
 def main():
-
 
     with open(
         INPUT,
@@ -69,7 +70,6 @@ def main():
             line_coords=geom["coordinates"]
 
 
-
         elif geom["type"]=="Point":
 
             name=feature["properties"]["name"]
@@ -78,15 +78,22 @@ def main():
 
 
 
-    transformer_to_meter=Transformer.from_crs(
+    print(
+        "站点:",
+        list(stations.keys())
+    )
+
+
+
+    to_meter = Transformer.from_crs(
         4326,
-        3857,
+        32651,
         always_xy=True
     )
 
 
-    transformer_to_wgs84=Transformer.from_crs(
-        3857,
+    to_wgs84 = Transformer.from_crs(
+        32651,
         4326,
         always_xy=True
     )
@@ -100,7 +107,7 @@ def main():
 
         meter_coords.append(
 
-            transformer_to_meter.transform(
+            to_meter.transform(
                 lng,
                 lat
             )
@@ -115,18 +122,18 @@ def main():
 
 
 
-    start=Point(
+    start_point=Point(
 
-        transformer_to_meter.transform(
+        to_meter.transform(
             *stations[START]
         )
 
     )
 
 
-    end=Point(
+    end_point=Point(
 
-        transformer_to_meter.transform(
+        to_meter.transform(
             *stations[END]
         )
 
@@ -135,58 +142,39 @@ def main():
 
 
     start_distance=line.project(
-        start
+        start_point
     )
 
 
     end_distance=line.project(
-        end
+        end_point
     )
+
+
+
+    reverse=False
 
 
 
     if start_distance>end_distance:
 
+        reverse=True
+
         start_distance,end_distance=end_distance,start_distance
 
 
 
-    length=end_distance-start_distance
-
-
-
     print(
-        "线路长度:",
-        round(length),
+        "区间长度:",
+        round(
+            end_distance-start_distance
+        ),
         "米"
     )
 
 
 
-    wb=Workbook()
-
-
-    ws=wb.active
-
-    ws.title="13号线轨迹"
-
-
-
-    ws.append(
-
-        [
-            "序号",
-            "名称",
-            "经度",
-            "纬度"
-        ]
-
-    )
-
-
-
-    index=1
-
+    points=[]
 
 
     distance=start_distance
@@ -196,94 +184,120 @@ def main():
     while distance<=end_distance:
 
 
-        point=line.interpolate(
+        p=line.interpolate(
             distance
         )
 
 
-        lng,lat=transformer_to_wgs84.transform(
-
-            point.x,
-
-            point.y
-
+        lng,lat=to_wgs84.transform(
+            p.x,
+            p.y
         )
 
 
-        ws.append(
-
+        points.append(
             [
-
-                index,
-
-                f"13号线#{index}",
-
                 round(lng,8),
-
                 round(lat,8)
-
             ]
-
         )
 
 
-        index+=1
-
-
-        distance += DISTANCE
+        distance+=DISTANCE
 
 
 
-    # 确保终点加入
+    # 加入终点
 
-    point=line.interpolate(
+    p=line.interpolate(
         end_distance
     )
 
 
-    lng,lat=transformer_to_wgs84.transform(
-        point.x,
-        point.y
+    lng,lat=to_wgs84.transform(
+        p.x,
+        p.y
     )
 
 
-    ws.append(
+    points.append(
 
         [
-
-            index,
-
-            f"13号线#{index}",
-
             round(lng,8),
-
             round(lat,8)
-
         ]
 
     )
 
 
 
-    # 自动列宽
+    # 如果线路方向相反
+
+    if reverse:
+
+        points.reverse()
+
+
+
+    wb=Workbook()
+
+
+    ws=wb.active
+
+
+    ws.title="13号线轨迹"
+
+
+
+    ws.append(
+
+        [
+            "名称",
+            "经度",
+            "纬度"
+        ]
+
+    )
+
+
+
+    for i,(lng,lat) in enumerate(points,1):
+
+
+        ws.append(
+
+            [
+
+                f"13号线#{i}",
+
+                lng,
+
+                lat
+
+            ]
+
+        )
+
+
 
     for col in ws.columns:
 
-        max_length=0
 
-        for cell in col:
+        width=max(
 
-            if cell.value:
+            len(
+                str(cell.value)
+            )
+            for cell in col
 
-                max_length=max(
-                    max_length,
-                    len(str(cell.value))
-                )
+            if cell.value
+
+        )
 
 
         ws.column_dimensions[
             col[0].column_letter
-        ].width=max_length+3
+        ].width=width+3
 
 
 
@@ -292,7 +306,6 @@ def main():
     ).parent.mkdir(
         exist_ok=True
     )
-
 
 
     wb.save(
@@ -308,8 +321,8 @@ def main():
 
 
     print(
-        "点数量:",
-        index
+        "轨迹点:",
+        len(points)
     )
 
 
