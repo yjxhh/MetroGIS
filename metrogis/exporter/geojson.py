@@ -1,110 +1,205 @@
 """
-MetroGIS GeoJSON Exporter
-
-负责将 MetroGIS 标准数据
-转换为 GeoJSON 格式
+GeoJSON exporter
 """
+
 
 import json
 
+from pathlib import Path
 
-def subway_to_geojson(subway_data: dict):
-    """
-    将地铁数据转换为 GeoJSON
 
-    参数:
-        subway_data:
-            {
-                "line": "线路名称",
-                "stations": [
-                    {
-                        "name": "",
-                        "lat": 0,
-                        "lng": 0
-                    }
-                ]
-            }
 
-    返回:
-        GeoJSON FeatureCollection
-    """
+
+def subway_to_geojson(
+    line
+):
+
 
     features = []
 
 
-    for station in subway_data.get(
-        "stations",
-        []
+
+    # 兼容旧测试 dict
+
+    if isinstance(
+        line,
+        dict
     ):
 
-        lat = station.get("lat")
-        lng = station.get("lng")
+
+        line_name = line.get(
+            "line",
+            ""
+        )
 
 
-        # 无坐标跳过
-        if lat is None or lng is None:
-            continue
+        stations = line.get(
+            "stations",
+            []
+        )
 
 
-        feature = {
+        geometry = []
 
-            "type": "Feature",
 
-            "geometry": {
+    else:
 
-                "type": "Point",
 
-                "coordinates": [
-                    lng,
-                    lat
-                ]
+        line_name = line.name
 
-            },
 
-            "properties": {
+        stations = line.stations
 
-                "name": station.get(
-                    "name"
-                ),
 
-                "line": subway_data.get(
-                    "line"
-                )
+        geometry = line.geometry
 
-            }
 
-        }
+
+    # LineString
+
+    if geometry:
 
 
         features.append(
-            feature
+
+            {
+
+                "type":"Feature",
+
+                "geometry":{
+
+                    "type":"LineString",
+
+                    "coordinates":geometry
+
+                },
+
+                "properties":{
+
+                    "name":line_name
+
+                }
+
+            }
+
         )
+
+
+
+    # stations
+
+    for station in stations:
+
+
+        if isinstance(
+            station,
+            dict
+        ):
+
+            name = station.get(
+                "name"
+            )
+
+            lat = station.get(
+                "lat"
+            )
+
+            lng = station.get(
+                "lng"
+            )
+
+
+        else:
+
+            name = station.name
+
+            lat = station.lat
+
+            lng = station.lng
+
+
+
+        features.append(
+
+            {
+
+                "type":"Feature",
+
+                "geometry":{
+
+                    "type":"Point",
+
+                    "coordinates":[
+
+                        lng,
+
+                        lat
+
+                    ]
+
+                },
+
+                "properties":{
+
+                    "name":name,
+
+                    "line":line_name
+
+                }
+
+            }
+
+        )
+
 
 
     return {
 
-        "type": "FeatureCollection",
+        "type":"FeatureCollection",
 
-        "features": features
+        "features":features
 
     }
 
 
 
-def save_geojson(data: dict, filename: str):
-    """
-    保存 GeoJSON 文件
-    """
+
+def save_geojson(
+    data,
+    filename
+):
+
+
+    path = Path(
+        filename
+    )
+
+
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
 
     with open(
-        filename,
+
+        path,
+
         "w",
+
         encoding="utf-8"
+
     ) as f:
 
+
         json.dump(
+
             data,
+
             f,
+
             ensure_ascii=False,
+
             indent=2
+
         )
