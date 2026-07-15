@@ -4,11 +4,27 @@ MetroGIS OSM Graph
 将 OSM way 转换为线路拓扑图
 
 用于:
-    最短路径搜索
+
+    - 最短路径搜索
+    - 轨迹还原
+    - 线路计算
+
+distance 使用真实米制距离
 """
 
 
-from math import sqrt
+from pyproj import Transformer
+
+
+
+#
+# 经纬度 -> 米
+#
+transformer = Transformer.from_crs(
+    "EPSG:4326",
+    "EPSG:3857",
+    always_xy=True
+)
 
 
 
@@ -19,19 +35,39 @@ def point_distance(
     b
 ):
     """
-    经纬度简单距离
+    计算两个经纬度点距离
 
-    后续可以替换 EPSG3857
+    输入:
 
+    [
+        lng,
+        lat
+    ]
+
+
+    返回:
+
+    米
     """
 
-    return sqrt(
-        (a[0]-b[0]) ** 2
-        +
-        (a[1]-b[1]) ** 2
+
+    ax, ay = transformer.transform(
+        a[0],
+        a[1]
     )
 
 
+    bx, by = transformer.transform(
+        b[0],
+        b[1]
+    )
+
+
+    return (
+        (ax-bx)**2
+        +
+        (ay-by)**2
+    ) ** 0.5
 
 
 
@@ -48,33 +84,43 @@ def build_osm_graph(
 
     [
         {
-          id,
-          nodes,
-          geometry
+            id,
+            nodes,
+            geometry
         }
     ]
+
 
 
     返回:
 
     {
         node_id:
-        {
-          "point":
-          [
-            lng,
-            lat
-          ],
 
-          "edges":
-          [
-             {
-              node,
-              distance
-             }
-          ]
+        {
+            point:
+
+            [
+                lng,
+                lat
+            ],
+
+
+            edges:
+
+            [
+                {
+                    node:
+                    distance
+                }
+            ]
+
         }
     }
+
+
+    distance:
+        米
 
     """
 
@@ -99,6 +145,9 @@ def build_osm_graph(
 
 
 
+        #
+        # 数据异常跳过
+        #
         if len(nodes) < 2:
 
             continue
@@ -111,6 +160,7 @@ def build_osm_graph(
 
 
 
+
         for i in range(
             len(nodes)-1
         ):
@@ -119,6 +169,7 @@ def build_osm_graph(
             node_a = nodes[i]
 
             node_b = nodes[i+1]
+
 
 
             point_a = geometry[i]
@@ -135,7 +186,7 @@ def build_osm_graph(
 
 
             #
-            # 保存节点
+            # 创建节点
             #
 
             if node_a not in graph:
@@ -167,7 +218,7 @@ def build_osm_graph(
 
 
             #
-            # 双向连接
+            # 双向边
             #
 
             graph[node_a]["edges"].append(
@@ -177,7 +228,10 @@ def build_osm_graph(
                         node_b,
 
                     "distance":
-                        distance
+                        round(
+                            distance,
+                            2
+                        )
 
                 }
             )
@@ -191,10 +245,14 @@ def build_osm_graph(
                         node_a,
 
                     "distance":
-                        distance
+                        round(
+                            distance,
+                            2
+                        )
 
                 }
             )
+
 
 
     return graph
