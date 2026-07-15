@@ -1,29 +1,59 @@
 """
-MetroGIS Route Builder V4.1.1
+MetroGIS Route Builder V5
 
-根据官方运营顺序
-匹配 OSM 轨迹
+基于 OSM Graph 构建地铁线路轨迹
+
+
+流程:
+
+官方站点顺序
+        |
+        |
+nearest OSM node
+        |
+        |
+Dijkstra shortest path
+        |
+        |
+node geometry
+        |
+        |
+TrackPoint
+
 
 功能:
 
-1. 官方站点顺序
-2. OSM轨迹匹配
-3. 米制距离计算
-4. TrackPoint输出
-5. 区间长度调试
+1. 官方运营顺序
+2. OSM拓扑路径
+3. 最短路径搜索
+4. 米制距离
+5. TrackPoint输出
 """
 
 
 from pyproj import Transformer
 
 
-from metrogis.provider.osm import (
-    get_osm_geometry
+from metrogis.api.track import (
+    get_track_geometry
 )
 
 
+from metrogis.geometry.osm_graph import (
+    build_osm_graph
+)
+
+
+from metrogis.geometry.path_finder import (
+    nearest_node,
+    shortest_path,
+    path_geometry
+)
+
+
+
 #
-# 经纬度 -> 米
+# 经纬度转米
 #
 transformer = Transformer.from_crs(
     "EPSG:4326",
@@ -33,18 +63,23 @@ transformer = Transformer.from_crs(
 
 
 
+
+
 def point_distance(
     a,
     b
 ):
     """
-    两点距离 米
+    两个经纬度点距离
+    单位: 米
     """
+
 
     ax, ay = transformer.transform(
         a[0],
         a[1]
     )
+
 
     bx, by = transformer.transform(
         b[0],
@@ -53,9 +88,12 @@ def point_distance(
 
 
     return (
-        (ax-bx)**2 +
+        (ax-bx)**2
+        +
         (ay-by)**2
     ) ** 0.5
+
+
 
 
 
@@ -68,12 +106,14 @@ def geometry_length(
     计算轨迹长度
     """
 
+
     total = 0
 
 
     for i in range(
         len(geometry)-1
     ):
+
 
         total += point_distance(
             geometry[i],
@@ -87,385 +127,75 @@ def geometry_length(
 
 
 
-def nearest_index(
-    geometry,
-    point
+
+
+def merge_geometry(
+    old,
+    new
 ):
     """
-    找最近节点
+    合并两个区间轨迹
+
+    去掉重复站点
     """
 
 
-    index = None
+    if not old:
 
-    minimum = float(
-        "inf"
-    )
+        return new
+
+
+
+    if not new:
+
+        return old
+
+
+
+    return old + new[1:]
+
+
+
+
+
+
+
+
+
+def add_track_points(
+    line,
+    geometry
+):
+    """
+    写入 Line.geometry
+
+    TrackPoint
+    """
+
+
+    line.geometry=[]
+
+
+    distance = 0
+
 
 
     for i,p in enumerate(
         geometry
     ):
 
-        d = point_distance(
-            p,
-            point
-        )
 
+        if i > 0:
 
-        if d < minimum:
-
-            minimum = d
-
-            index = i
-
-
-    return index, minimum
-
-
-
-
-
-
-def cut_segment(
-    geometry,
-    start,
-    end
-):
-    """
-    根据两个站点截取轨迹
-    """
-
-
-    s, sd = nearest_index(
-        geometry,
-        start
-    )
-
-
-    e, ed = nearest_index(
-        geometry,
-        end
-    )
-
-
-    if s is None or e is None:
-
-        return [],999999
-
-
-
-    if s <= e:
-
-        segment = geometry[
-            s:e+1
-        ]
-
-    else:
-
-        segment = list(
-            reversed(
-                geometry[e:s+1]
-            )
-        )
-
-
-    return (
-        segment,
-        sd + ed
-    )
-
-
-
-
-
-
-
-def calculate_score(
-    segment,
-    error,
-    start,
-    end
-):
-    """
-    匹配评分
-    """
-
-
-    if len(segment)<2:
-
-        return -1
-
-
-
-    real_length = geometry_length(
-        segment
-    )
-
-
-    direct = point_distance(
-        start,
-        end
-    )
-
-
-    if direct == 0:
-
-        return -1
-
-
-
-    ratio = (
-        real_length /
-        direct
-    )
-
-
-
-    #
-    # 地铁线路长度比例
-    #
-
-    if ratio < 0.7:
-
-        return -1
-
-
-    if ratio > 5:
-
-        return -1
-
-
-
-    length_score = (
-        100 -
-        abs(
-            ratio-1.5
-        )*30
-    )
-
-
-
-    error_score = (
-        1000 /
-        (
-            error+1
-        )
-    )
-
-
-
-    point_score = min(
-        len(segment),
-        200
-    )
-
-
-    return (
-        length_score
-        +
-        error_score
-        +
-        point_score
-    )
-
-
-
-
-
-
-
-def build_route_geometry(
-    line,
-    bbox
-):
-    """
-    根据Line对象生成完整轨迹
-    """
-
-
-    print(
-        "获取OSM轨迹..."
-    )
-
-
-    tracks = get_osm_geometry(
-        bbox
-    )
-
-
-    print(
-        "轨迹数量:",
-        len(tracks)
-    )
-
-
-
-    route=[]
-
-
-
-    stations = line.stations
-
-
-
-    for i in range(
-        len(stations)-1
-    ):
-
-
-        start=[
-            stations[i].lng,
-            stations[i].lat
-        ]
-
-
-        end=[
-            stations[i+1].lng,
-            stations[i+1].lat
-        ]
-
-
-
-        print(
-            "匹配:",
-            stations[i].name,
-            "->",
-            stations[i+1].name
-        )
-
-
-
-        best=None
-
-        best_score=-1
-
-
-
-        best_id=None
-
-
-
-        for track in tracks:
-
-
-            segment,error = cut_segment(
-
-                track["geometry"],
-
-                start,
-
-                end
-
-            )
-
-
-
-            score = calculate_score(
-
-                segment,
-
-                error,
-
-                start,
-
-                end
-
-            )
-
-
-
-            if score > best_score:
-
-                best_score = score
-
-                best = segment
-
-                best_id = track["id"]
-
-
-
-
-
-        if best:
-
-
-            length = geometry_length(
-                best
-            )
-
-
-            print(
-                "  way:",
-                best_id,
-                "长度:",
-                round(
-                    length,
-                    2
-                ),
-                "米"
-            )
-
-
-
-            if route:
-
-                route.extend(
-                    best[1:]
-                )
-
-            else:
-
-                route.extend(
-                    best
-                )
-
-
-
-
-    #
-    # 总长度
-    #
-
-    total = geometry_length(
-        route
-    )
-
-
-    print(
-        "线路长度:",
-        round(
-            total,
-            2
-        ),
-        "米"
-    )
-
-
-
-
-    #
-    # 写入 TrackPoint
-    #
-
-    line.geometry=[]
-
-
-    distance=0
-
-
-
-    for i,p in enumerate(
-        route
-    ):
-
-
-        if i>0:
 
             distance += point_distance(
-                route[i-1],
+
+                geometry[i-1],
+
                 p
+
             )
+
 
 
         line.add_geometry_point(
@@ -480,6 +210,282 @@ def build_route_geometry(
             )
 
         )
+
+
+
+    return line
+
+
+
+
+
+
+
+def build_route_geometry(
+    line,
+    bbox
+):
+    """
+    根据官方站点顺序生成线路
+
+
+    参数:
+
+        line:
+            Line对象
+
+
+        bbox:
+            (
+              south,
+              west,
+              north,
+              east
+            )
+
+
+
+    返回:
+
+        Line
+    """
+
+
+
+    print(
+        "获取OSM轨迹..."
+    )
+
+
+
+    tracks = get_track_geometry(
+        bbox
+    )
+
+
+
+    print(
+        "轨迹数量:",
+        len(tracks)
+    )
+
+
+
+
+
+    print(
+        "构建OSM Graph..."
+    )
+
+
+    graph = build_osm_graph(
+        tracks
+    )
+
+
+    print(
+        "节点数量:",
+        len(graph)
+    )
+
+
+
+    route=[]
+
+
+
+    stations = line.stations
+
+
+
+
+    for i in range(
+        len(stations)-1
+    ):
+
+
+        start_station = stations[i]
+
+        end_station = stations[i+1]
+
+
+
+        print()
+
+
+        print(
+            "路径:",
+            start_station.name,
+            "->",
+            end_station.name
+        )
+
+
+
+
+        start_point=[
+
+            start_station.lng,
+
+            start_station.lat
+
+        ]
+
+
+
+        end_point=[
+
+            end_station.lng,
+
+            end_station.lat
+
+        ]
+
+
+
+
+        start_node = nearest_node(
+
+            graph,
+
+            start_point
+
+        )
+
+
+        end_node = nearest_node(
+
+            graph,
+
+            end_point
+
+        )
+
+
+
+        if start_node is None:
+
+
+            print(
+                "起点匹配失败:",
+                start_station.name
+            )
+
+            continue
+
+
+
+        if end_node is None:
+
+
+            print(
+                "终点匹配失败:",
+                end_station.name
+            )
+
+            continue
+
+
+
+
+
+        path = shortest_path(
+
+            graph,
+
+            start_node,
+
+            end_node
+
+        )
+
+
+
+
+        if not path:
+
+
+            print(
+                "没有找到路径"
+            )
+
+            continue
+
+
+
+
+
+        geometry = path_geometry(
+
+            graph,
+
+            path
+
+        )
+
+
+
+        print(
+
+            "节点:",
+            len(path),
+
+            "轨迹点:",
+            len(geometry)
+
+        )
+
+
+
+
+        route = merge_geometry(
+
+            route,
+
+            geometry
+
+        )
+
+
+
+
+
+
+    print()
+
+
+    length = geometry_length(
+        route
+    )
+
+
+    print(
+        "线路长度:",
+        round(
+            length,
+            2
+        ),
+        "米"
+    )
+
+
+
+    print(
+        "最终轨迹点:",
+        len(route)
+    )
+
+
+
+
+    add_track_points(
+
+        line,
+
+        route
+
+    )
+
 
 
     return line
