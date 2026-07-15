@@ -1,17 +1,21 @@
 """
-MetroGIS Track API
+MetroGIS Track API V2
 
-负责从 OpenStreetMap 获取
-地铁运行轨迹 geometry
+获取 OSM railway track geometry
 
-升级:
-1. 保留 way id
-2. 保留 node 拓扑关系
-3. 支持 Graph 构建
+功能:
+
+1. Overpass 查询 railway way
+2. 返回 node
+3. 返回 geometry
+4. 保存 OSM tags 信息
+
 """
 
 
-from .overpass import query_overpass
+from metrogis.api.overpass import (
+    query_overpass
+)
 
 
 
@@ -21,41 +25,116 @@ def build_track_query(
     bbox
 ):
     """
-    构造轨道查询
+    构造 Overpass 查询
+
+
+    bbox:
+
+    south,
+    west,
+    north,
+    east
+
     """
 
 
     south, west, north, east = bbox
 
 
-    return f"""
+    query = f"""
+    [out:json];
 
-[out:json][timeout:180];
+    (
+      way
+      ["railway"="subway"]
+      ({south},{west},{north},{east});
 
+      way
+      ["railway"="light_rail"]
+      ({south},{west},{north},{east});
 
-(
-    
-way
-[
- railway="subway"
-]
-({south},{west},{north},{east});
+      way
+      ["railway"="rail"]
+      ({south},{west},{north},{east});
+    );
 
-
-way
-[
- railway="light_rail"
-]
-({south},{west},{north},{east});
-
-
-);
+    out geom;
+    """
 
 
-out geom;
+    return query
 
 
-"""
+
+
+
+
+
+def normalize_tags(
+    tags
+):
+    """
+    提取常用字段
+    """
+
+
+    if not tags:
+
+        tags={}
+
+
+
+    return {
+
+        "tags":
+            tags,
+
+
+        "name":
+            tags.get(
+                "name"
+            ),
+
+
+        "railway":
+            tags.get(
+                "railway"
+            ),
+
+
+        "service":
+            tags.get(
+                "service"
+            ),
+
+
+        "operator":
+            tags.get(
+                "operator"
+            ),
+
+
+        "layer":
+            tags.get(
+                "layer"
+            ),
+
+
+        "bridge":
+            tags.get(
+                "bridge"
+            ),
+
+
+        "tunnel":
+            tags.get(
+                "tunnel"
+            )
+
+    }
+
+
+
 
 
 
@@ -65,17 +144,29 @@ def get_track_geometry(
     bbox
 ):
     """
-    获取 OSM 轨迹
+    获取 OSM轨迹
 
 
     返回:
 
     [
-        {
-            id,
-            nodes,
-            geometry
-        }
+
+      {
+
+        id,
+
+        nodes,
+
+        geometry,
+
+        tags,
+
+        railway,
+
+        name
+
+      }
+
     ]
 
     """
@@ -91,7 +182,8 @@ def get_track_geometry(
     )
 
 
-    result = []
+    tracks=[]
+
 
 
     for element in data.get(
@@ -100,60 +192,88 @@ def get_track_geometry(
     ):
 
 
-        geometry = element.get(
-            "geometry"
-        )
-
-
-        if not geometry:
+        if element.get(
+            "type"
+        ) != "way":
 
             continue
 
 
 
-        points = []
+        geometry=[]
 
 
-        for point in geometry:
+        nodes=[]
 
 
-            points.append(
+
+        for point in element.get(
+            "geometry",
+            []
+        ):
+
+
+            geometry.append(
+
                 [
+
                     point["lon"],
+
                     point["lat"]
+
                 ]
+
             )
 
 
 
-        #
-        # OSM way 节点
-        #
-        nodes = element.get(
+        for node in element.get(
             "nodes",
             []
+        ):
+
+            nodes.append(
+                node
+            )
+
+
+
+        if len(nodes)<2:
+
+            continue
+
+
+
+        track = {
+
+
+            "id":
+                element["id"],
+
+
+            "nodes":
+                nodes,
+
+
+            "geometry":
+                geometry,
+
+
+            **normalize_tags(
+                element.get(
+                    "tags",
+                    {}
+                )
+            )
+
+        }
+
+
+
+        tracks.append(
+            track
         )
 
 
 
-        result.append(
-            {
-
-                "id":
-                    element.get(
-                        "id"
-                    ),
-
-
-                "nodes":
-                    nodes,
-
-
-                "geometry":
-                    points
-
-            }
-        )
-
-
-    return result
+    return tracks

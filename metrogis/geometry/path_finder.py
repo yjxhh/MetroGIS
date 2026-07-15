@@ -1,22 +1,32 @@
 """
-MetroGIS Path Finder
+MetroGIS Path Finder V2
 
 基于 OSM Graph
-进行线路路径搜索
 
 功能:
 
-1. 最近节点搜索
-2. 最短路径
-3. 节点转轨迹
+1. KDTree最近节点搜索
+2. Dijkstra最短路径
+3. node转geometry
+4. 路径距离计算
 """
 
 
 import heapq
 
 
-
 from math import sqrt
+
+
+try:
+
+    from scipy.spatial import KDTree
+
+    SCIPY_AVAILABLE = True
+
+except ImportError:
+
+    SCIPY_AVAILABLE = False
 
 
 
@@ -28,8 +38,6 @@ def point_distance(
 ):
     """
     经纬度距离
-
-    这里只用于节点匹配
 
     """
 
@@ -43,55 +51,165 @@ def point_distance(
 
 
 
+class SpatialIndex:
+    """
+    OSM Graph空间索引
+
+    """
+
+    def __init__(
+        self,
+        graph
+    ):
+
+        self.graph = graph
+
+
+        self.nodes=[]
+
+        self.points=[]
+
+
+
+        for node,data in graph.items():
+
+            self.nodes.append(
+                node
+            )
+
+            self.points.append(
+                data["point"]
+            )
+
+
+
+        if SCIPY_AVAILABLE:
+
+
+            self.tree = KDTree(
+                self.points
+            )
+
+
+        else:
+
+            self.tree=None
+
+
+
+
+
+
+    def nearest(
+        self,
+        point
+    ):
+        """
+        最近节点
+        """
+
+        if self.tree:
+
+
+            distance,index = self.tree.query(
+                point
+            )
+
+
+            return self.nodes[index]
+
+
+
+        #
+        # fallback
+        #
+
+        nearest=None
+
+        minimum=float(
+            "inf"
+        )
+
+
+        for node,p in zip(
+            self.nodes,
+            self.points
+        ):
+
+
+            d=point_distance(
+                p,
+                point
+            )
+
+
+            if d < minimum:
+
+                minimum=d
+
+                nearest=node
+
+
+
+        return nearest
+
+
+
+
+
+
+
+def build_spatial_index(
+    graph
+):
+    """
+    创建空间索引
+    """
+
+    return SpatialIndex(
+        graph
+    )
+
+
+
+
+
 
 
 def nearest_node(
     graph,
-    point
+    point,
+    index=None
 ):
     """
-    查找距离坐标最近的 OSM node
+    查找最近OSM节点
 
 
     point:
 
     [
-        lng,
-        lat
+      lng,
+      lat
     ]
-
-    返回:
-
-    node_id
 
     """
 
 
-    nearest = None
 
-    minimum = float(
-        "inf"
-    )
+    if index is None:
 
 
-    for node,data in graph.items():
-
-
-        d = point_distance(
-            data["point"],
-            point
+        index = build_spatial_index(
+            graph
         )
 
 
-        if d < minimum:
 
-            minimum = d
-
-            nearest = node
-
+    return index.nearest(
+        point
+    )
 
 
-    return nearest
 
 
 
@@ -105,31 +223,11 @@ def find_shortest_path(
     end
 ):
     """
-    Dijkstra 最短路径
-
-
-    start:
-
-        node id
-
-
-    end:
-
-        node id
-
-
-    返回:
-
-        [
-          node1,
-          node2,
-          ...
-        ]
+    Dijkstra
 
     """
 
-
-    queue = []
+    queue=[]
 
 
     heapq.heappush(
@@ -141,14 +239,14 @@ def find_shortest_path(
     )
 
 
-    distance = {
+    distance={
 
         start:0
 
     }
 
 
-    previous = {}
+    previous={}
 
 
 
@@ -176,14 +274,14 @@ def find_shortest_path(
 
 
 
-
         for edge in graph[current]["edges"]:
 
 
-            neighbor = edge["node"]
+            neighbor=edge["node"]
 
 
-            weight = edge["distance"]
+            weight=edge["distance"]
+
 
 
             new_distance = (
@@ -199,10 +297,11 @@ def find_shortest_path(
             ):
 
 
-                distance[neighbor] = new_distance
+                distance[neighbor]=new_distance
 
 
-                previous[neighbor] = current
+                previous[neighbor]=current
+
 
 
                 heapq.heappush(
@@ -216,31 +315,23 @@ def find_shortest_path(
 
 
 
-    #
-    # 回溯路径
-    #
-
     if end not in previous and start != end:
 
         return []
 
 
 
-    path = [
-
-        end
-
-    ]
+    path=[end]
 
 
-    current = end
+    current=end
 
 
 
     while current != start:
 
 
-        current = previous[current]
+        current=previous[current]
 
 
         path.append(
@@ -248,12 +339,29 @@ def find_shortest_path(
         )
 
 
-
     path.reverse()
 
 
-
     return path
+
+
+
+
+
+
+
+
+def shortest_path(
+    graph,
+    start,
+    end
+):
+
+    return find_shortest_path(
+        graph,
+        start,
+        end
+    )
 
 
 
@@ -266,20 +374,11 @@ def path_to_geometry(
     path
 ):
     """
-    node路径转经纬度
-
-
-    返回:
-
-    [
-       [lng,lat],
-       ...
-    ]
-
+    node -> 经纬度
     """
 
 
-    result = []
+    result=[]
 
 
     for node in path:
@@ -291,57 +390,85 @@ def path_to_geometry(
 
 
     return result
-def shortest_path(
-    graph,
-    start,
-    end
-):
-    """
-    shortest_path 兼容接口
 
-    调用 Dijkstra
-    """
 
-    return find_shortest_path(
-        graph,
-        start,
-        end
-    )
+
+
+
+
+
+
 def path_geometry(
     graph,
     path
 ):
-    """
-    path_geometry 兼容接口
-
-    node路径转换为经纬度轨迹
-
-    返回:
-
-    [
-        [lng,lat],
-        ...
-    ]
-
-    """
 
     return path_to_geometry(
         graph,
         path
     )
+
+
+
+
+
+
+
+
 def find_path(
     graph,
-    start,
-    end
+    start_node,
+    end_node
 ):
     """
-    find_path 兼容接口
+    返回带距离信息路径
 
-    调用最短路径搜索
     """
 
-    return shortest_path(
+    path=find_shortest_path(
         graph,
-        start,
-        end
+        start_node,
+        end_node
     )
+
+
+    result=[]
+
+
+    total=0
+
+
+
+    for i,node in enumerate(path):
+
+
+        point=graph[node]["point"]
+
+
+
+        if i>0:
+
+            total += point_distance(
+                graph[path[i-1]]["point"],
+                point
+            )
+
+
+
+        result.append(
+
+            {
+                "node":node,
+
+                "point":point,
+
+                "distance":round(
+                    total,
+                    2
+                )
+            }
+
+        )
+
+
+    return result

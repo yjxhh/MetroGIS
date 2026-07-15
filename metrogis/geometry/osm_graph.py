@@ -1,31 +1,33 @@
 """
-MetroGIS OSM Graph
+MetroGIS OSM Graph V4.1
 
-OSM轨迹转换为拓扑图
+OSM way -> Graph
 
 功能:
 
-1. OSM way -> Graph
-2. 经纬度米制距离
-3. 节点合并
-4. 断点修复
-5. 最短路径支持
+1. 节点拓扑
+2. 米制距离
+3. 保存 way metadata
+4. railway 过滤
+5. route 过滤
+6. 去除重复 Edge
+7. Edge 保存完整 metadata
 
+用于:
+
+- shortest path
+- route builder
+- metro geometry reconstruction
 """
 
+from math import sqrt
 
 from pyproj import Transformer
-
-from scipy.spatial import KDTree
-
-
-
 
 
 #
 # 经纬度 -> 米
 #
-
 transformer = Transformer.from_crs(
     "EPSG:4326",
     "EPSG:3857",
@@ -33,16 +35,12 @@ transformer = Transformer.from_crs(
 )
 
 
-
-
-
 def point_distance(
     a,
     b
 ):
     """
-    经纬度距离(米)
-
+    两点距离（米）
     """
 
     ax, ay = transformer.transform(
@@ -55,599 +53,243 @@ def point_distance(
         b[1]
     )
 
-
-    return (
-        (ax-bx)**2
-        +
-        (ay-by)**2
-    ) ** 0.5
+    return sqrt(
+        (ax - bx) ** 2 +
+        (ay - by) ** 2
+    )
 
 
+def check_filter(
+    track,
+    railway_filter=None,
+    route_filter=None
+):
+    """
+    判断 Way 是否保留
+    """
 
+    tags = track.get(
+        "tags",
+        {}
+    )
 
+    if railway_filter:
 
+        railway = tags.get(
+            "railway"
+        )
+
+        if railway != railway_filter:
+            return False
+
+    if route_filter:
+
+        route = tags.get(
+            "route"
+        )
+
+        if route != route_filter:
+            return False
+
+    return True
 
 
 def build_osm_graph(
-    tracks
+    tracks,
+    railway_filter=None,
+    route_filter=None
 ):
     """
     构建 OSM Graph
 
-
-    输入:
-
-    [
-        {
-            id,
-            nodes,
-            geometry
-        }
-    ]
-
-
-    返回:
+    graph =
 
     {
         node_id:
         {
-            point:
-            [lng,lat],
+            point:[lng,lat],
 
             edges:
             [
-              {
-                node,
-                distance
-              }
+                {
+                    node,
+                    distance,
+                    way,
+                    tags
+                }
             ]
         }
     }
-
-
     """
 
-
-
-    graph={}
-
-
-
-    #
-    # 第一阶段
-    # 建立原始节点
-    #
-
     print(
-        "原始节点:",
-        sum(
-            len(
-                t.get(
-                    "nodes",
-                    []
-                )
-            )
-            for t in tracks
-        )
+        "构建OSM Graph..."
     )
 
+    graph = {}
 
+    raw_nodes = 0
+
+    used_ways = 0
+
+    #
+    # 防止重复 Edge
+    #
+    edge_cache = set()
 
     for track in tracks:
 
+        if not check_filter(
+            track,
+            railway_filter,
+            route_filter
+        ):
+            continue
 
-        nodes=track.get(
+        nodes = track.get(
             "nodes",
             []
         )
 
-
-        geometry=track.get(
+        geometry = track.get(
             "geometry",
             []
         )
 
-
-        if len(nodes)<2:
-
+        if len(nodes) < 2:
             continue
 
-
-        if len(nodes)!=len(geometry):
-
+        if len(nodes) != len(geometry):
             continue
 
-
-
-        for node,point in zip(
-            nodes,
-            geometry
-        ):
-
-
-            if node not in graph:
-
-
-                graph[node]={
-
-                    "point":point,
-
-                    "edges":[]
-
-                }
-
-
-
-
-
+        used_ways += 1
 
         #
-        # 添加way边
+        # 每条 Way 独立复制 tags
         #
+        tags = dict(
+            track.get(
+                "tags",
+                {}
+            )
+        )
+
+        way = track.get(
+            "id"
+        )
+
+        raw_nodes += len(nodes)
 
         for i in range(
-            len(nodes)-1
+            len(nodes) - 1
         ):
 
+            node_a = nodes[i]
+            node_b = nodes[i + 1]
 
-            a=nodes[i]
+            point_a = geometry[i]
+            point_b = geometry[i + 1]
 
-            b=nodes[i+1]
-
-
-            distance=point_distance(
-                graph[a]["point"],
-                graph[b]["point"]
+            distance = point_distance(
+                point_a,
+                point_b
             )
 
+            if node_a not in graph:
 
-            graph[a]["edges"].append(
+                graph[node_a] = {
 
-                {
+                    "point": point_a,
 
-                    "node":b,
-
-                    "distance":distance
+                    "edges": []
 
                 }
 
-            )
+            if node_b not in graph:
 
+                graph[node_b] = {
 
-            graph[b]["edges"].append(
+                    "point": point_b,
 
-                {
-
-                    "node":a,
-
-                    "distance":distance
+                    "edges": []
 
                 }
 
+            #
+            # A -> B
+            #
+            key_ab = (
+                node_a,
+                node_b,
+                way
             )
 
+            if key_ab not in edge_cache:
 
+                graph[node_a]["edges"].append(
 
+                    {
 
+                        "node": node_b,
+
+                        "distance": distance,
+
+                        "way": way,
+
+                        "tags": tags
+
+                    }
+
+                )
+
+                edge_cache.add(
+                    key_ab
+                )
+
+            #
+            # B -> A
+            #
+            key_ba = (
+                node_b,
+                node_a,
+                way
+            )
+
+            if key_ba not in edge_cache:
+
+                graph[node_b]["edges"].append(
+
+                    {
+
+                        "node": node_a,
+
+                        "distance": distance,
+
+                        "way": way,
+
+                        "tags": tags
+
+                    }
+
+                )
+
+                edge_cache.add(
+                    key_ba
+                )
 
     print(
-        "节点数量:",
+        "使用way:",
+        used_ways
+    )
+
+    print(
+        "原始节点:",
+        raw_nodes
+    )
+
+    print(
+        "最终节点:",
         len(graph)
     )
-
-
-    return graph
-
-
-
-
-
-
-
-
-def merge_near_nodes(
-    graph,
-    threshold=2
-):
-    """
-    合并距离非常近的节点
-
-    threshold:
-
-        米
-
-    """
-
-
-
-    ids=list(
-        graph.keys()
-    )
-
-
-    points=[
-
-        graph[i]["point"]
-
-        for i in ids
-
-    ]
-
-
-    xy=[]
-
-
-    for p in points:
-
-        x,y=transformer.transform(
-            p[0],
-            p[1]
-        )
-
-        xy.append(
-            [
-                x,
-                y
-            ]
-        )
-
-
-
-    tree=KDTree(
-        xy
-    )
-
-
-    mapping={}
-
-
-
-    removed=set()
-
-
-
-    for i,node in enumerate(ids):
-
-
-        if node in removed:
-
-            continue
-
-
-
-        neighbors=tree.query_ball_point(
-
-            xy[i],
-
-            threshold
-
-        )
-
-
-        for n in neighbors:
-
-
-            other=ids[n]
-
-
-            if other==node:
-
-                continue
-
-
-            if other in removed:
-
-                continue
-
-
-
-            mapping[other]=node
-
-
-            removed.add(
-                other
-            )
-
-
-
-
-
-    #
-    # 没有合并
-    #
-
-    if not mapping:
-
-
-        print(
-            "无节点合并"
-        )
-
-        return graph
-
-
-
-
-
-
-    new_graph={}
-
-
-
-    for node,data in graph.items():
-
-
-        if node in mapping:
-
-            continue
-
-
-        new_graph[node]=data
-
-
-
-    #
-    # 更新边
-    #
-
-    for node,data in new_graph.items():
-
-
-        edges=[]
-
-
-        for e in data["edges"]:
-
-
-            target=e["node"]
-
-
-            if target in mapping:
-
-                target=mapping[target]
-
-
-            if target==node:
-
-                continue
-
-
-            edges.append(
-
-                {
-
-                    "node":target,
-
-                    "distance":e["distance"]
-
-                }
-
-            )
-
-
-        data["edges"]=edges
-
-
-
-
-    print(
-        "合并后节点:",
-        len(new_graph)
-    )
-
-
-    return new_graph
-
-
-
-
-
-
-
-
-
-
-def repair_graph_connections(
-    graph,
-    threshold=15
-):
-    """
-    修复少量断点
-
-    只处理:
-
-    degree <= 1
-
-
-    """
-
-
-
-    ids=list(
-        graph.keys()
-    )
-
-
-    points=[
-
-        graph[i]["point"]
-
-        for i in ids
-
-    ]
-
-
-    xy=[]
-
-
-    for p in points:
-
-        x,y=transformer.transform(
-            p[0],
-            p[1]
-        )
-
-        xy.append(
-            [
-                x,
-                y
-            ]
-        )
-
-
-    tree=KDTree(
-        xy
-    )
-
-
-
-    repaired=0
-
-
-
-
-    for index,node in enumerate(ids):
-
-
-        #
-        # 正常节点不处理
-        #
-
-        if len(
-            graph[node]["edges"]
-        )>1:
-
-            continue
-
-
-
-        neighbors=tree.query_ball_point(
-
-            xy[index],
-
-            threshold
-
-        )
-
-
-
-        for n in neighbors:
-
-
-            other=ids[n]
-
-
-            if other==node:
-
-                continue
-
-
-
-            exists=False
-
-
-            for e in graph[node]["edges"]:
-
-                if e["node"]==other:
-
-                    exists=True
-
-                    break
-
-
-
-            if exists:
-
-                continue
-
-
-
-            d=point_distance(
-
-                graph[node]["point"],
-
-                graph[other]["point"]
-
-            )
-
-
-
-            graph[node]["edges"].append(
-
-                {
-
-                    "node":other,
-
-                    "distance":d
-
-                }
-
-            )
-
-
-            graph[other]["edges"].append(
-
-                {
-
-                    "node":node,
-
-                    "distance":d
-
-                }
-
-            )
-
-
-            repaired+=1
-
-
-            break
-
-
-
-
-    print(
-        "修复断点:",
-        repaired
-    )
-
-
-
-    return graph
-
-
-
-
-
-
-
-
-
-
-
-def build_connected_osm_graph(
-    tracks
-):
-    """
-    完整建图入口
-
-    """
-
-
-
-    graph=build_osm_graph(
-        tracks
-    )
-
-
-    graph=merge_near_nodes(
-        graph
-    )
-
-
-    graph=repair_graph_connections(
-        graph
-    )
-
 
     return graph
