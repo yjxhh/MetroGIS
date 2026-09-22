@@ -1,5 +1,5 @@
 """
-MetroGIS Parser Route Builder V6.7-2.2.2
+MetroGIS Parser Route Builder V6.7-2.2
 
 全国化站点构建器（V6.7-2.2）
 
@@ -1180,20 +1180,12 @@ def _best_endpoint_extension(
     side: str,
     main_id: Any,
 ) -> Optional[Dict[str, Any]]:
-    """Find an evidence-backed missing prefix/suffix for a Main endpoint.
+    """Find an evidence-backed missing prefix/suffix from another Relation.
 
-    V6.7-2.2.2 supports two evidence modes:
-
-    1. ``actual_sequence``: another same-cohort Relation really contains the
-       declared terminal and the current Main endpoint in its stop sequence.
-    2. ``declared_endpoint``: another same-cohort Relation declares the target
-       terminal with ``from=/to=`` (or the endpoint encoded in ``name``), while
-       its observed stop sequence begins/ends at the Main endpoint. This is
-       required for real OSM cases where the terminal is declared by the Route
-       Relation but omitted from the stop member list.
-
-    No arbitrary station union is allowed. The declared-endpoint mode only adds
-    the one missing terminal itself; it does not copy an unrelated segment.
+    Only use an extension when another Relation explicitly/implicitly contains
+    the missing terminal and that terminal is directly connected to the current
+    Main endpoint (possibly through a short contiguous prefix/suffix). This
+    prevents arbitrary union-of-stations behaviour.
     """
     if not target or not main_records:
         return None
@@ -1205,241 +1197,157 @@ def _best_endpoint_extension(
     anchor = main_names[0] if side == "start" else main_names[-1]
     candidates: List[Dict[str, Any]] = []
 
-    def _record(name: str, source_item: Dict[str, Any], kind: str) -> Dict[str, Any]:
-        # Endpoint coordinates are intentionally optional in V6.7-2.2.2.
-        # Geometry can still use the authoritative Relation Way chain; a later
-        # geometry-stage enrichment may populate missing terminal coordinates.
-        return {
-            "id": None,
-            "name": name,
-            "point": None,
-            "raw": None,
-            "node": None,
-            "completion_evidence": kind,
-            "source_relation_id": source_item.get("relation_id"),
-        }
-
     for item in cohort:
         if item.get("relation_id") == main_id:
             continue
-
         source_records = list(item.get("records", []) or [])
         if not source_records:
             continue
 
-        metadata = item.get("metadata", {}) or {}
-        declared_from = _normalize_endpoint_name(metadata.get("from", ""))
-        declared_to = _normalize_endpoint_name(metadata.get("to", ""))
-
         for reversed_source in (False, True):
-            records = (
-                list(reversed(source_records))
-                if reversed_source
-                else list(source_records)
-            )
+            records = list(reversed(source_records)) if reversed_source else source_records
             names = _relation_record_names(records)
-            if not names:
+            if not names or target not in names or anchor not in names:
                 continue
 
-            # Declared endpoints must follow the same orientation as the
-            # oriented source records.
-            oriented_from = declared_to if reversed_source else declared_from
-            oriented_to = declared_from if reversed_source else declared_to
+            target_indices = [i for i, name in enumerate(names) if name == target]
+            anchor_indices = [i for i, name in enumerate(names) if name == anchor]
 
-            actual_source_start, actual_source_end = _relation_endpoint_names(records)
+            for target_index in target_indices:
+                for anchor_index in anchor_indices:
+                    if side == "start":
+                        if target_index >= anchor_index:
+                            continue
+                        # Extension ends exactly at Main's first station.
+                        extension = records[target_index:anchor_index]
+                        if not extension:
+                            continue
+                        # Prefer the most local bridge to the Main anchor.
+                        bridge_names = [
+                            _normalize_endpoint_name(r.get("name", ""))
+                            for r in extension
+                        ]
+                        if bridge_names and bridge_names[-1] != names[anchor_index - 1]:
+                            continue
+                    else:
+                        if target_index <= anchor_index:
+                            continue
+                        extension = records[anchor_index + 1:target_index + 1]
+                        if not extension:
+                            continue
+                        bridge_names = [
+                            _normalize_endpoint_name(r.get("name", ""))
+                            for r in extension
+                        ]
+                        if bridge_names and bridge_names[0] != names[anchor_index + 1]:
+                            continue
 
-            # ---------------------------------------------------------------
-            # Mode 1: target is explicitly present in the observed stop list.
-            # ---------------------------------------------------------------
-            if target in names and anchor in names:
-                target_indices = [i for i, name in enumerate(names) if name == target]
-                anchor_indices = [i for i, name in enumerate(names) if name == anchor]
+                    if not extension:
+                        continue
 
-                for target_index in target_indices:
-                    for anchor_index in anchor_indices:
-                        if side == "start":
-                            if target_index >= anchor_index:
-                                continue
-                            # Exclude the Main anchor itself; the extension must
-                            # begin with the requested terminal and end immediately
-                            # before the anchor in this evidence Relation.
-                            extension = records[target_index:anchor_index]
-                            if not extension:
-                                continue
-                            extension_first = _normalize_endpoint_name(
-                                extension[0].get("name", "")
-                            )
-                            if extension_first != target:
-                                continue
-                        else:
-                            if target_index <= anchor_index:
-                                continue
-                            # Exclude the Main anchor itself; extension ends with
-                            # the requested terminal.
-                            extension = records[anchor_index + 1:target_index + 1]
-                            if not extension:
-                                continue
-                            extension_last = _normalize_endpoint_name(
-                                extension[-1].get("name", "")
-                            )
-                            if extension_last != target:
-                                continue
+                    # The extension must actually begin/end with the requested
+                    # terminal. This is our strongest guard against accidental
+                    # station unioning.
+                    extension_first = _normalize_endpoint_name(extension[0].get("name", ""))
+                    extension_last = _normalize_endpoint_name(extension[-1].get("name", ""))
+                    if side == "start" and extension_first != target:
+                        continue
+                    if side == "end" and extension_last != target:
+                        continue
 
-                        candidates.append(
-                            {
-                                "source_relation_id": item.get("relation_id"),
-                                "source_relation_name": item.get("relation_name", ""),
-                                "records": extension,
-                                "length": len(extension),
-                                "identity_score": float(item.get("identity_score", 0.0) or 0.0),
-                                "reversed_source": reversed_source,
-                                "evidence_kind": "actual_sequence",
-                            }
-                        )
-
-            # ---------------------------------------------------------------
-            # Mode 2: OSM Relation declares the missing terminal, but its stop
-            # sequence starts/ends at the Main anchor. Add only that terminal.
-            # ---------------------------------------------------------------
-            if side == "start":
-                if oriented_from == target and actual_source_start == anchor:
                     candidates.append(
                         {
                             "source_relation_id": item.get("relation_id"),
                             "source_relation_name": item.get("relation_name", ""),
-                            "records": [_record(target, item, "declared_endpoint")],
-                            "length": 1,
+                            "records": extension,
+                            "length": len(extension),
                             "identity_score": float(item.get("identity_score", 0.0) or 0.0),
                             "reversed_source": reversed_source,
-                            "evidence_kind": "declared_endpoint",
-                        }
-                    )
-            else:
-                if oriented_to == target and actual_source_end == anchor:
-                    candidates.append(
-                        {
-                            "source_relation_id": item.get("relation_id"),
-                            "source_relation_name": item.get("relation_name", ""),
-                            "records": [_record(target, item, "declared_endpoint")],
-                            "length": 1,
-                            "identity_score": float(item.get("identity_score", 0.0) or 0.0),
-                            "reversed_source": reversed_source,
-                            "evidence_kind": "declared_endpoint",
                         }
                     )
 
     if not candidates:
         return None
 
-    # Prefer observed stop-sequence evidence over metadata-only endpoint
-    # evidence. Within the same evidence class, shorter extensions are safer.
+    # Shortest evidence-backed extension wins. Identity is only a tie-breaker.
     return min(
         candidates,
         key=lambda item: (
-            0 if item["evidence_kind"] == "actual_sequence" else 1,
             item["length"],
             -item["identity_score"],
             item["source_relation_id"] or 10**18,
         ),
     )
 
+
 def _complete_main_route_endpoints(
     main: Dict[str, Any],
     cohort: Sequence[Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Complete missing Main terminal stops using same-cohort Relation evidence.
+    """Complete missing Main terminal stops using Relation evidence only.
 
-    V6.7-2.2.2 fixes the real-world case where a Route Relation declares
-    ``机场北 -> 海傍`` but its stop sequence begins at ``高增`` and ends at
-    ``海涌路``. The missing terminals are recovered from other same-identity
-    Relations whose ``from/to`` declaration bridges directly to the observed
-    Main endpoint.
-
-    Internal station gaps are still left untouched.
+    V6.7-2.2 deliberately handles endpoints only. Internal gaps are left alone
+    for a later quality/completion stage so that this change cannot silently
+    reshape a valid OSM station sequence.
     """
     completed = dict(main)
     records = list(main.get("records", []) or [])
-    before_records = list(records)
     before_count = len(records)
-    before_start, before_end = _relation_endpoint_names(records)
     declared_from, declared_to = _candidate_endpoint_hints(main)
+    actual_start, actual_end = _relation_endpoint_names(records)
 
     added_start: List[Dict[str, Any]] = []
     added_end: List[Dict[str, Any]] = []
     evidence_ids: List[Any] = []
-    evidence_kinds: Dict[str, str] = {}
 
-    if declared_from and declared_from != before_start:
+    if declared_from and declared_from != actual_start:
         evidence = _best_endpoint_extension(
-            records,
-            cohort,
-            declared_from,
-            "start",
-            main.get("relation_id"),
+            records, cohort, declared_from, "start", main.get("relation_id")
         )
         if evidence is not None:
             records = list(evidence["records"]) + records
             added_start = list(evidence["records"])
-            source_id = evidence.get("source_relation_id")
-            evidence_ids.append(source_id)
-            evidence_kinds["start"] = evidence.get("evidence_kind", "unknown")
+            evidence_ids.append(evidence["source_relation_id"])
 
-    # Re-read the end after start completion; the anchor at the end is unchanged,
-    # but using the current sequence keeps the operation deterministic.
-    current_start, current_end = _relation_endpoint_names(records)
-    if declared_to and declared_to != current_end:
+    # Re-read the end after start completion so that endpoint comparisons always
+    # use the current sequence.
+    actual_start, actual_end = _relation_endpoint_names(records)
+    if declared_to and declared_to != actual_end:
         evidence = _best_endpoint_extension(
-            records,
-            cohort,
-            declared_to,
-            "end",
-            main.get("relation_id"),
+            records, cohort, declared_to, "end", main.get("relation_id")
         )
         if evidence is not None:
             records = records + list(evidence["records"])
             added_end = list(evidence["records"])
-            source_id = evidence.get("source_relation_id")
-            evidence_ids.append(source_id)
-            evidence_kinds["end"] = evidence.get("evidence_kind", "unknown")
+            evidence_ids.append(evidence["source_relation_id"])
 
-    actual_start_after, actual_end_after = _relation_endpoint_names(records)
+    actual_start, actual_end = _relation_endpoint_names(records)
     added_count = len(records) - before_count
 
-    if not added_count:
-        completion_confidence = 1.0
-    else:
-        side_scores: List[float] = []
-        if added_start:
-            side_scores.append(
-                1.0 if evidence_kinds.get("start") == "actual_sequence" else 0.85
-            )
-        if added_end:
-            side_scores.append(
-                1.0 if evidence_kinds.get("end") == "actual_sequence" else 0.85
-            )
-        completion_confidence = sum(side_scores) / len(side_scores) if side_scores else 0.0
+    completion_confidence = 1.0 if not added_count else 0.0
+    if added_count:
+        # Endpoint declarations plus evidence-backed station records are strong;
+        # an extension containing multiple inferred stops remains slightly lower
+        # confidence than an exact native Relation sequence.
+        has_declared_start = bool(declared_from and added_start)
+        has_declared_end = bool(declared_to and added_end)
+        exact_sides = int(has_declared_start) + int(has_declared_end)
+        completion_confidence = min(1.0, 0.55 + 0.20 * exact_sides + 0.25 / max(1, added_count))
 
     completion = {
         "applied": bool(added_count),
         "declared_start": declared_from,
         "declared_end": declared_to,
-        "actual_start_before": before_start,
-        "actual_end_before": before_end,
-        "actual_start_after": actual_start_after,
-        "actual_end_after": actual_end_after,
+        "actual_start_before": actual_start if not added_count else (_relation_endpoint_names(main.get("records", []) or [])[0]),
+        "actual_end_before": _relation_endpoint_names(main.get("records", []) or [])[1],
+        "actual_start_after": actual_start,
+        "actual_end_after": actual_end,
         "added_start_count": len(added_start),
         "added_end_count": len(added_end),
         "added_count": added_count,
-        "start_evidence_relation_ids": (
-            [evidence_ids[0]] if added_start and evidence_ids else []
-        ),
-        "end_evidence_relation_ids": (
-            [evidence_ids[-1]] if added_end and evidence_ids else []
-        ),
+        "start_evidence_relation_ids": list(dict.fromkeys([evidence_ids[0]])) if added_start and evidence_ids else [],
+        "end_evidence_relation_ids": list(dict.fromkeys([evidence_ids[-1]])) if added_end and evidence_ids else [],
         "evidence_relation_ids": list(dict.fromkeys(evidence_ids)),
-        "evidence_kinds": evidence_kinds,
-        "before_station_count": before_count,
-        "after_station_count": len(records),
         "confidence": completion_confidence,
     }
 
@@ -1447,6 +1355,7 @@ def _complete_main_route_endpoints(
     completed["station_count"] = len(records)
     completed["completion"] = completion
     return completed, completion
+
 
 def _rebuild_main_pair_quality(
     main: Dict[str, Any],
@@ -1682,7 +1591,7 @@ def _resolve_route_master(
 ) -> Optional[Dict[str, Any]]:
     """Resolve one logical metro line from multiple OSM route Relations.
 
-    V6.7-2.2.2 adds one conservative step after Main selection: if the selected
+    V6.7-2.2 adds one conservative step after Main selection: if the selected
     Main relation declares a terminal in name=/from=/to= but its stop sequence
     is missing that terminal, recover the missing endpoint only from another
     same-cohort Relation that directly bridges to the Main endpoint.
@@ -1772,34 +1681,11 @@ def _resolve_route_master(
             "confidence": min(1.0, max(0.0, float(main_pair.get("confidence", 0.0)))),
         }
 
-    # Completion metrics are reported in two distinct dimensions:
-    #
-    #   forward_added_stops / reverse_added_stops
-    #       directional work performed on each Main direction;
-    #
-    #   unique_added_stops
-    #       net additions to the canonical Main Station Sequence actually
-    #       exposed by Line.stations.
-    #
-    # Previously ``total_added_stops`` summed both directions, so adding one
-    # missing terminal to each direction produced ``4`` even though the
-    # canonical Main gained only two unique stations. Keep the legacy field as
-    # an alias of the canonical unique count for unambiguous reporting.
-    forward_added_stops = int(main_completion.get("added_count", 0))
-    reverse_added_stops = int((reverse_completion or {}).get("added_count", 0))
-    unique_added_stops = forward_added_stops
-
     completion_records = {
         "applied": bool(main_completion.get("applied") or (reverse_completion or {}).get("applied")),
         "main": main_completion,
         "reverse": reverse_completion,
-        "forward_added_stops": forward_added_stops,
-        "reverse_added_stops": reverse_added_stops,
-        "directional_added_stops": forward_added_stops + reverse_added_stops,
-        "unique_added_stops": unique_added_stops,
-        # Backward-compatible, but now explicitly canonical/net rather than a
-        # double-counted forward+reverse total.
-        "total_added_stops": unique_added_stops,
+        "total_added_stops": int(main_completion.get("added_count", 0)) + int((reverse_completion or {}).get("added_count", 0)),
         "confidence": min(
             1.0,
             max(
@@ -1889,11 +1775,7 @@ def _resolve_route_master(
                 main_pair_quality["confidence"] if main_pair_quality else None
             ),
             "main_route_completion_applied": completion_records["applied"],
-            "main_route_completion_added_stops": completion_records["unique_added_stops"],
-            "main_route_completion_unique_added_stops": completion_records["unique_added_stops"],
-            "main_route_completion_directional_added_stops": completion_records["directional_added_stops"],
-            "main_route_completion_forward_added_stops": completion_records["forward_added_stops"],
-            "main_route_completion_reverse_added_stops": completion_records["reverse_added_stops"],
+            "main_route_completion_added_stops": completion_records["total_added_stops"],
             "main_route_completion_confidence": completion_records["confidence"],
         },
         "explicit_route_master_ids": list(explicit_master_ids),
@@ -1990,10 +1872,7 @@ def _discover_stations_from_relation(
     print("Route Master Main/Pair 质量:")
     if completion.get("applied"):
         print(
-            f"  Main 端点补全: +{completion.get('unique_added_stops', completion.get('total_added_stops', 0))} 站 | "
-            f"forward=+{completion.get('forward_added_stops', 0)} | "
-            f"reverse=+{completion.get('reverse_added_stops', 0)} | "
-            f"directional_total={completion.get('directional_added_stops', completion.get('total_added_stops', 0))} | "
+            f"  Main 端点补全: +{completion.get('total_added_stops', 0)} 站 | "
             f"confidence={float(completion.get('confidence', 0.0)):.1%} | "
             f"declared={route_master['main'].get('declared_start_station', '')} -> "
             f"{route_master['main'].get('declared_end_station', '')}"

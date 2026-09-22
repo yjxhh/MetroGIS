@@ -1,5 +1,5 @@
 """
-MetroGIS Parser Route Builder V6.7-2.2.2
+MetroGIS Parser Route Builder V6.7-2.2.1
 
 全国化站点构建器（V6.7-2.2）
 
@@ -1182,7 +1182,7 @@ def _best_endpoint_extension(
 ) -> Optional[Dict[str, Any]]:
     """Find an evidence-backed missing prefix/suffix for a Main endpoint.
 
-    V6.7-2.2.2 supports two evidence modes:
+    V6.7-2.2.1 supports two evidence modes:
 
     1. ``actual_sequence``: another same-cohort Relation really contains the
        declared terminal and the current Main endpoint in its stop sequence.
@@ -1206,7 +1206,7 @@ def _best_endpoint_extension(
     candidates: List[Dict[str, Any]] = []
 
     def _record(name: str, source_item: Dict[str, Any], kind: str) -> Dict[str, Any]:
-        # Endpoint coordinates are intentionally optional in V6.7-2.2.2.
+        # Endpoint coordinates are intentionally optional in V6.7-2.2.1.
         # Geometry can still use the authoritative Relation Way chain; a later
         # geometry-stage enrichment may populate missing terminal coordinates.
         return {
@@ -1349,7 +1349,7 @@ def _complete_main_route_endpoints(
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Complete missing Main terminal stops using same-cohort Relation evidence.
 
-    V6.7-2.2.2 fixes the real-world case where a Route Relation declares
+    V6.7-2.2.1 fixes the real-world case where a Route Relation declares
     ``机场北 -> 海傍`` but its stop sequence begins at ``高增`` and ends at
     ``海涌路``. The missing terminals are recovered from other same-identity
     Relations whose ``from/to`` declaration bridges directly to the observed
@@ -1682,7 +1682,7 @@ def _resolve_route_master(
 ) -> Optional[Dict[str, Any]]:
     """Resolve one logical metro line from multiple OSM route Relations.
 
-    V6.7-2.2.2 adds one conservative step after Main selection: if the selected
+    V6.7-2.2.1 adds one conservative step after Main selection: if the selected
     Main relation declares a terminal in name=/from=/to= but its stop sequence
     is missing that terminal, recover the missing endpoint only from another
     same-cohort Relation that directly bridges to the Main endpoint.
@@ -1772,34 +1772,11 @@ def _resolve_route_master(
             "confidence": min(1.0, max(0.0, float(main_pair.get("confidence", 0.0)))),
         }
 
-    # Completion metrics are reported in two distinct dimensions:
-    #
-    #   forward_added_stops / reverse_added_stops
-    #       directional work performed on each Main direction;
-    #
-    #   unique_added_stops
-    #       net additions to the canonical Main Station Sequence actually
-    #       exposed by Line.stations.
-    #
-    # Previously ``total_added_stops`` summed both directions, so adding one
-    # missing terminal to each direction produced ``4`` even though the
-    # canonical Main gained only two unique stations. Keep the legacy field as
-    # an alias of the canonical unique count for unambiguous reporting.
-    forward_added_stops = int(main_completion.get("added_count", 0))
-    reverse_added_stops = int((reverse_completion or {}).get("added_count", 0))
-    unique_added_stops = forward_added_stops
-
     completion_records = {
         "applied": bool(main_completion.get("applied") or (reverse_completion or {}).get("applied")),
         "main": main_completion,
         "reverse": reverse_completion,
-        "forward_added_stops": forward_added_stops,
-        "reverse_added_stops": reverse_added_stops,
-        "directional_added_stops": forward_added_stops + reverse_added_stops,
-        "unique_added_stops": unique_added_stops,
-        # Backward-compatible, but now explicitly canonical/net rather than a
-        # double-counted forward+reverse total.
-        "total_added_stops": unique_added_stops,
+        "total_added_stops": int(main_completion.get("added_count", 0)) + int((reverse_completion or {}).get("added_count", 0)),
         "confidence": min(
             1.0,
             max(
@@ -1889,11 +1866,7 @@ def _resolve_route_master(
                 main_pair_quality["confidence"] if main_pair_quality else None
             ),
             "main_route_completion_applied": completion_records["applied"],
-            "main_route_completion_added_stops": completion_records["unique_added_stops"],
-            "main_route_completion_unique_added_stops": completion_records["unique_added_stops"],
-            "main_route_completion_directional_added_stops": completion_records["directional_added_stops"],
-            "main_route_completion_forward_added_stops": completion_records["forward_added_stops"],
-            "main_route_completion_reverse_added_stops": completion_records["reverse_added_stops"],
+            "main_route_completion_added_stops": completion_records["total_added_stops"],
             "main_route_completion_confidence": completion_records["confidence"],
         },
         "explicit_route_master_ids": list(explicit_master_ids),
@@ -1990,10 +1963,7 @@ def _discover_stations_from_relation(
     print("Route Master Main/Pair 质量:")
     if completion.get("applied"):
         print(
-            f"  Main 端点补全: +{completion.get('unique_added_stops', completion.get('total_added_stops', 0))} 站 | "
-            f"forward=+{completion.get('forward_added_stops', 0)} | "
-            f"reverse=+{completion.get('reverse_added_stops', 0)} | "
-            f"directional_total={completion.get('directional_added_stops', completion.get('total_added_stops', 0))} | "
+            f"  Main 端点补全: +{completion.get('total_added_stops', 0)} 站 | "
             f"confidence={float(completion.get('confidence', 0.0)):.1%} | "
             f"declared={route_master['main'].get('declared_start_station', '')} -> "
             f"{route_master['main'].get('declared_end_station', '')}"

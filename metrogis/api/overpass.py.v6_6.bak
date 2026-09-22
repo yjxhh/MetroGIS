@@ -194,7 +194,7 @@ def normalize_relation_name(
     # 去掉最后 :xxx
     #
     value = re.sub(
-        r"[:：][^:：]+$",
+        r":[^:]+$",
         "",
         value
     )

@@ -1,7 +1,7 @@
 """
-MetroGIS Parser Route Builder V6.7-2.2.2
+MetroGIS Parser Route Builder V6.7-2
 
-全国化站点构建器（V6.7-2.2）
+全国化站点构建器（V6.7-2）
 
 核心设计：
 1. OSM Relation 的 stop sequence 是线路站点发现的第一数据源。
@@ -12,8 +12,6 @@ MetroGIS Parser Route Builder V6.7-2.2.2
 6. 不修改 YAML，不为单个城市/线路写特殊规则。
 7. 保持 create_route(city, line, bbox) / build_route 等旧调用兼容。
 8. V6.7-2：同一线路多个 OSM Relation 先形成 Route Master，再区分 Main / Branch / Partial / Variant。
-9. V6.7-2.1：统一 Route Master overlap 指标为 0~1，增加 shared_stops / coverage / endpoint_match / confidence 质量指标。
-10. V6.7-2.2：Main Relation 声明端点缺失时，仅从同 Cohort 的证据 Relation 中补齐首尾站，不改变内部站序。
 
 与 geometry/route_builder.py V10.1 的职责分离：
 - 本文件：决定 Line.stations 的最终站点集合与顺序。
@@ -1018,53 +1016,19 @@ def _station_name_set(records: Sequence[Dict[str, Any]]) -> set[str]:
     }
 
 
-def _sequence_overlap_metrics(
-    a: Sequence[Dict[str, Any]],
-    b: Sequence[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """Return normalized ordered-overlap metrics.
-
-    All ratio fields are guaranteed to stay in [0, 1]. ``shared_stops`` is
-    the longest ordered common subsequence length.
-    """
+def _sequence_overlap(a: Sequence[Dict[str, Any]], b: Sequence[Dict[str, Any]]) -> float:
+    """Ordered overlap relative to the shorter Relation."""
     a_count = len(_relation_record_names(a))
     b_count = len(_relation_record_names(b))
     if not a_count or not b_count:
-        return {
-            "shared_stops": 0,
-            "a_stops": a_count,
-            "b_stops": b_count,
-            "overlap_ratio": 0.0,
-            "a_coverage": 0.0,
-            "b_coverage": 0.0,
-            "shorter_coverage": 0.0,
-        }
-
+        return 0.0
     common = _ordered_common_station_count(a, b)
-    common = max(0, min(common, a_count, b_count))
-    overlap_ratio = common / min(a_count, b_count)
-    a_coverage = common / a_count
-    b_coverage = common / b_count
-    shorter_coverage = max(a_coverage, b_coverage)
-
-    return {
-        "shared_stops": common,
-        "a_stops": a_count,
-        "b_stops": b_count,
-        "overlap_ratio": min(1.0, max(0.0, overlap_ratio)),
-        "a_coverage": min(1.0, max(0.0, a_coverage)),
-        "b_coverage": min(1.0, max(0.0, b_coverage)),
-        "shorter_coverage": min(1.0, max(0.0, shorter_coverage)),
-    }
-
-
-def _sequence_overlap(a: Sequence[Dict[str, Any]], b: Sequence[Dict[str, Any]]) -> float:
-    """Ordered overlap relative to the shorter Relation, normalized to [0, 1]."""
-    return float(_sequence_overlap_metrics(a, b)["overlap_ratio"])
+    return common / min(a_count, b_count)
 
 
 def _reverse_sequence_overlap(a: Sequence[Dict[str, Any]], b: Sequence[Dict[str, Any]]) -> float:
-    return _sequence_overlap(a, list(reversed(b)))
+    reversed_b = list(reversed(b))
+    return _sequence_overlap(a, reversed_b)
 
 
 def _relation_endpoint_names(records: Sequence[Dict[str, Any]]) -> Tuple[str, str]:
@@ -1089,38 +1053,9 @@ def _candidate_identity_score(candidate: Dict[str, Any]) -> float:
 def _candidate_metadata(candidate: Dict[str, Any]) -> Dict[str, Any]:
     relation = candidate.get("relation", {}) or {}
     tags = relation.get("tags", {}) or {}
-    name = _clean_text(tags.get("name") or relation.get("name") or "")
-
-    # PTv2 commonly exposes from/to on route relations.  Some imported relations
-    # only encode the endpoints in name=...A → B.  Keep both forms available to
-    # the Route Master completion layer without making either one mandatory.
-    declared_from = _clean_text(
-        tags.get("from")
-        or relation.get("from")
-        or candidate.get("from")
-        or ""
-    )
-    declared_to = _clean_text(
-        tags.get("to")
-        or relation.get("to")
-        or candidate.get("to")
-        or ""
-    )
-
-    if (not declared_from or not declared_to) and name:
-        endpoint_match = re.search(
-            r"(?:：|:)\s*(.+?)\s*(?:→|->|至)\s*(.+?)\s*$",
-            name,
-        )
-        if endpoint_match:
-            if not declared_from:
-                declared_from = _clean_text(endpoint_match.group(1))
-            if not declared_to:
-                declared_to = _clean_text(endpoint_match.group(2))
-
     return {
         "id": relation.get("id"),
-        "name": name,
+        "name": _clean_text(tags.get("name") or relation.get("name") or ""),
         "ref": _clean_text(tags.get("ref") or relation.get("ref") or ""),
         "type": _clean_text(tags.get("type") or relation.get("type") or ""),
         "route": _clean_text(tags.get("route") or relation.get("route") or ""),
@@ -1133,350 +1068,6 @@ def _candidate_metadata(candidate: Dict[str, Any]) -> Dict[str, Any]:
             or ""
         ),
         "route_master_id": relation.get("route_master_id") or candidate.get("route_master_id"),
-        "from": declared_from,
-        "to": declared_to,
-    }
-
-
-def _normalize_endpoint_name(value: Any) -> str:
-    return _normalize_station_name(value)
-
-
-def _candidate_endpoint_hints(item: Dict[str, Any]) -> Tuple[str, str]:
-    metadata = item.get("metadata", {}) or {}
-    declared_from = _normalize_endpoint_name(metadata.get("from", ""))
-    declared_to = _normalize_endpoint_name(metadata.get("to", ""))
-
-    # Metadata is normally prepared by _candidate_metadata(), but allow direct
-    # test fixtures / older callers to work too.
-    if not declared_from or not declared_to:
-        name = _clean_text(item.get("relation_name", ""))
-        match = re.search(
-            r"(?:：|:)\s*(.+?)\s*(?:→|->|至)\s*(.+?)\s*$",
-            name,
-        )
-        if match:
-            if not declared_from:
-                declared_from = _normalize_endpoint_name(match.group(1))
-            if not declared_to:
-                declared_to = _normalize_endpoint_name(match.group(2))
-
-    return declared_from, declared_to
-
-
-def _find_record_index(records: Sequence[Dict[str, Any]], target: str) -> Optional[int]:
-    if not target:
-        return None
-    for index, record in enumerate(records):
-        if _normalize_endpoint_name(record.get("name", "")) == target:
-            return index
-    return None
-
-
-def _best_endpoint_extension(
-    main_records: Sequence[Dict[str, Any]],
-    cohort: Sequence[Dict[str, Any]],
-    target: str,
-    side: str,
-    main_id: Any,
-) -> Optional[Dict[str, Any]]:
-    """Find an evidence-backed missing prefix/suffix for a Main endpoint.
-
-    V6.7-2.2.2 supports two evidence modes:
-
-    1. ``actual_sequence``: another same-cohort Relation really contains the
-       declared terminal and the current Main endpoint in its stop sequence.
-    2. ``declared_endpoint``: another same-cohort Relation declares the target
-       terminal with ``from=/to=`` (or the endpoint encoded in ``name``), while
-       its observed stop sequence begins/ends at the Main endpoint. This is
-       required for real OSM cases where the terminal is declared by the Route
-       Relation but omitted from the stop member list.
-
-    No arbitrary station union is allowed. The declared-endpoint mode only adds
-    the one missing terminal itself; it does not copy an unrelated segment.
-    """
-    if not target or not main_records:
-        return None
-
-    main_names = _relation_record_names(main_records)
-    if not main_names:
-        return None
-
-    anchor = main_names[0] if side == "start" else main_names[-1]
-    candidates: List[Dict[str, Any]] = []
-
-    def _record(name: str, source_item: Dict[str, Any], kind: str) -> Dict[str, Any]:
-        # Endpoint coordinates are intentionally optional in V6.7-2.2.2.
-        # Geometry can still use the authoritative Relation Way chain; a later
-        # geometry-stage enrichment may populate missing terminal coordinates.
-        return {
-            "id": None,
-            "name": name,
-            "point": None,
-            "raw": None,
-            "node": None,
-            "completion_evidence": kind,
-            "source_relation_id": source_item.get("relation_id"),
-        }
-
-    for item in cohort:
-        if item.get("relation_id") == main_id:
-            continue
-
-        source_records = list(item.get("records", []) or [])
-        if not source_records:
-            continue
-
-        metadata = item.get("metadata", {}) or {}
-        declared_from = _normalize_endpoint_name(metadata.get("from", ""))
-        declared_to = _normalize_endpoint_name(metadata.get("to", ""))
-
-        for reversed_source in (False, True):
-            records = (
-                list(reversed(source_records))
-                if reversed_source
-                else list(source_records)
-            )
-            names = _relation_record_names(records)
-            if not names:
-                continue
-
-            # Declared endpoints must follow the same orientation as the
-            # oriented source records.
-            oriented_from = declared_to if reversed_source else declared_from
-            oriented_to = declared_from if reversed_source else declared_to
-
-            actual_source_start, actual_source_end = _relation_endpoint_names(records)
-
-            # ---------------------------------------------------------------
-            # Mode 1: target is explicitly present in the observed stop list.
-            # ---------------------------------------------------------------
-            if target in names and anchor in names:
-                target_indices = [i for i, name in enumerate(names) if name == target]
-                anchor_indices = [i for i, name in enumerate(names) if name == anchor]
-
-                for target_index in target_indices:
-                    for anchor_index in anchor_indices:
-                        if side == "start":
-                            if target_index >= anchor_index:
-                                continue
-                            # Exclude the Main anchor itself; the extension must
-                            # begin with the requested terminal and end immediately
-                            # before the anchor in this evidence Relation.
-                            extension = records[target_index:anchor_index]
-                            if not extension:
-                                continue
-                            extension_first = _normalize_endpoint_name(
-                                extension[0].get("name", "")
-                            )
-                            if extension_first != target:
-                                continue
-                        else:
-                            if target_index <= anchor_index:
-                                continue
-                            # Exclude the Main anchor itself; extension ends with
-                            # the requested terminal.
-                            extension = records[anchor_index + 1:target_index + 1]
-                            if not extension:
-                                continue
-                            extension_last = _normalize_endpoint_name(
-                                extension[-1].get("name", "")
-                            )
-                            if extension_last != target:
-                                continue
-
-                        candidates.append(
-                            {
-                                "source_relation_id": item.get("relation_id"),
-                                "source_relation_name": item.get("relation_name", ""),
-                                "records": extension,
-                                "length": len(extension),
-                                "identity_score": float(item.get("identity_score", 0.0) or 0.0),
-                                "reversed_source": reversed_source,
-                                "evidence_kind": "actual_sequence",
-                            }
-                        )
-
-            # ---------------------------------------------------------------
-            # Mode 2: OSM Relation declares the missing terminal, but its stop
-            # sequence starts/ends at the Main anchor. Add only that terminal.
-            # ---------------------------------------------------------------
-            if side == "start":
-                if oriented_from == target and actual_source_start == anchor:
-                    candidates.append(
-                        {
-                            "source_relation_id": item.get("relation_id"),
-                            "source_relation_name": item.get("relation_name", ""),
-                            "records": [_record(target, item, "declared_endpoint")],
-                            "length": 1,
-                            "identity_score": float(item.get("identity_score", 0.0) or 0.0),
-                            "reversed_source": reversed_source,
-                            "evidence_kind": "declared_endpoint",
-                        }
-                    )
-            else:
-                if oriented_to == target and actual_source_end == anchor:
-                    candidates.append(
-                        {
-                            "source_relation_id": item.get("relation_id"),
-                            "source_relation_name": item.get("relation_name", ""),
-                            "records": [_record(target, item, "declared_endpoint")],
-                            "length": 1,
-                            "identity_score": float(item.get("identity_score", 0.0) or 0.0),
-                            "reversed_source": reversed_source,
-                            "evidence_kind": "declared_endpoint",
-                        }
-                    )
-
-    if not candidates:
-        return None
-
-    # Prefer observed stop-sequence evidence over metadata-only endpoint
-    # evidence. Within the same evidence class, shorter extensions are safer.
-    return min(
-        candidates,
-        key=lambda item: (
-            0 if item["evidence_kind"] == "actual_sequence" else 1,
-            item["length"],
-            -item["identity_score"],
-            item["source_relation_id"] or 10**18,
-        ),
-    )
-
-def _complete_main_route_endpoints(
-    main: Dict[str, Any],
-    cohort: Sequence[Dict[str, Any]],
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Complete missing Main terminal stops using same-cohort Relation evidence.
-
-    V6.7-2.2.2 fixes the real-world case where a Route Relation declares
-    ``机场北 -> 海傍`` but its stop sequence begins at ``高增`` and ends at
-    ``海涌路``. The missing terminals are recovered from other same-identity
-    Relations whose ``from/to`` declaration bridges directly to the observed
-    Main endpoint.
-
-    Internal station gaps are still left untouched.
-    """
-    completed = dict(main)
-    records = list(main.get("records", []) or [])
-    before_records = list(records)
-    before_count = len(records)
-    before_start, before_end = _relation_endpoint_names(records)
-    declared_from, declared_to = _candidate_endpoint_hints(main)
-
-    added_start: List[Dict[str, Any]] = []
-    added_end: List[Dict[str, Any]] = []
-    evidence_ids: List[Any] = []
-    evidence_kinds: Dict[str, str] = {}
-
-    if declared_from and declared_from != before_start:
-        evidence = _best_endpoint_extension(
-            records,
-            cohort,
-            declared_from,
-            "start",
-            main.get("relation_id"),
-        )
-        if evidence is not None:
-            records = list(evidence["records"]) + records
-            added_start = list(evidence["records"])
-            source_id = evidence.get("source_relation_id")
-            evidence_ids.append(source_id)
-            evidence_kinds["start"] = evidence.get("evidence_kind", "unknown")
-
-    # Re-read the end after start completion; the anchor at the end is unchanged,
-    # but using the current sequence keeps the operation deterministic.
-    current_start, current_end = _relation_endpoint_names(records)
-    if declared_to and declared_to != current_end:
-        evidence = _best_endpoint_extension(
-            records,
-            cohort,
-            declared_to,
-            "end",
-            main.get("relation_id"),
-        )
-        if evidence is not None:
-            records = records + list(evidence["records"])
-            added_end = list(evidence["records"])
-            source_id = evidence.get("source_relation_id")
-            evidence_ids.append(source_id)
-            evidence_kinds["end"] = evidence.get("evidence_kind", "unknown")
-
-    actual_start_after, actual_end_after = _relation_endpoint_names(records)
-    added_count = len(records) - before_count
-
-    if not added_count:
-        completion_confidence = 1.0
-    else:
-        side_scores: List[float] = []
-        if added_start:
-            side_scores.append(
-                1.0 if evidence_kinds.get("start") == "actual_sequence" else 0.85
-            )
-        if added_end:
-            side_scores.append(
-                1.0 if evidence_kinds.get("end") == "actual_sequence" else 0.85
-            )
-        completion_confidence = sum(side_scores) / len(side_scores) if side_scores else 0.0
-
-    completion = {
-        "applied": bool(added_count),
-        "declared_start": declared_from,
-        "declared_end": declared_to,
-        "actual_start_before": before_start,
-        "actual_end_before": before_end,
-        "actual_start_after": actual_start_after,
-        "actual_end_after": actual_end_after,
-        "added_start_count": len(added_start),
-        "added_end_count": len(added_end),
-        "added_count": added_count,
-        "start_evidence_relation_ids": (
-            [evidence_ids[0]] if added_start and evidence_ids else []
-        ),
-        "end_evidence_relation_ids": (
-            [evidence_ids[-1]] if added_end and evidence_ids else []
-        ),
-        "evidence_relation_ids": list(dict.fromkeys(evidence_ids)),
-        "evidence_kinds": evidence_kinds,
-        "before_station_count": before_count,
-        "after_station_count": len(records),
-        "confidence": completion_confidence,
-    }
-
-    completed["records"] = records
-    completed["station_count"] = len(records)
-    completed["completion"] = completion
-    return completed, completion
-
-def _rebuild_main_pair_quality(
-    main: Dict[str, Any],
-    reverse_item: Optional[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    if reverse_item is None:
-        return None
-
-    metrics = _sequence_overlap_metrics(
-        main.get("records", []) or [],
-        list(reversed(reverse_item.get("records", []) or [])),
-    )
-    left_start, left_end = _relation_endpoint_names(main.get("records", []) or [])
-    right_start, right_end = _relation_endpoint_names(reverse_item.get("records", []) or [])
-    endpoint_match = bool(
-        left_start and left_end and right_start and right_end
-        and left_start == right_end
-        and left_end == right_start
-    )
-    confidence = (0.80 * metrics["overlap_ratio"]) + (0.20 if endpoint_match else 0.0)
-    return {
-        "forward_id": main.get("relation_id"),
-        "reverse_id": reverse_item.get("relation_id"),
-        "shared_stops": metrics["shared_stops"],
-        "overlap_ratio": min(1.0, max(0.0, metrics["overlap_ratio"])),
-        "forward_coverage": min(1.0, max(0.0, metrics["a_coverage"])),
-        "reverse_coverage": min(1.0, max(0.0, metrics["b_coverage"])),
-        "endpoint_match": endpoint_match,
-        "confidence": min(1.0, max(0.0, confidence)),
-        "overlap": min(1.0, max(0.0, metrics["overlap_ratio"])),
     }
 
 
@@ -1506,7 +1097,7 @@ def _identity_cohort(evaluated: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]
 def _pair_route_directions(
     evaluated: Sequence[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Pair opposite-direction route relations using normalized quality metrics."""
+    """Pair opposite-direction route relations using their stop sequences."""
     pairs: List[Dict[str, Any]] = []
     used: set[int] = set()
 
@@ -1516,59 +1107,41 @@ def _pair_route_directions(
             continue
 
         best_pair = None
+        best_score = 0.0
         for j in range(i + 1, len(evaluated)):
             right = evaluated[j]
             right_id = right.get("relation_id")
             if right_id in used or left_id == right_id:
                 continue
 
-            metrics = _sequence_overlap_metrics(left["records"], list(reversed(right["records"])))
-            raw_overlap = metrics["overlap_ratio"]
-            if raw_overlap < _ROUTE_MASTER_DIRECTION_OVERLAP:
+            score = _reverse_sequence_overlap(left["records"], right["records"])
+            if score < _ROUTE_MASTER_DIRECTION_OVERLAP:
                 continue
 
+            # Prefer pairs with similar lengths and explicit opposite endpoints.
             left_start, left_end = _relation_endpoint_names(left["records"])
             right_start, right_end = _relation_endpoint_names(right["records"])
-            endpoint_match = bool(
-                left_start
-                and left_end
-                and right_start
-                and right_end
-                and left_start == right_end
-                and left_end == right_start
-            )
+            endpoint_bonus = 0.0
+            if left_start and left_end and right_start and right_end:
+                if left_start == right_end and left_end == right_start:
+                    endpoint_bonus = 0.10
 
-            # Confidence is deliberately normalized to [0, 1]. Endpoint match
-            # is a quality signal, not an additive bonus that can make overlap > 1.
-            confidence = (0.80 * raw_overlap) + (0.20 if endpoint_match else 0.0)
-            confidence = min(1.0, max(0.0, confidence))
-
+            score_with_bonus = score + endpoint_bonus
             length_delta = abs(left["station_count"] - right["station_count"])
-            candidate_key = (
-                confidence,
-                raw_overlap,
-                1 if endpoint_match else 0,
-                -length_delta,
-                right["station_count"],
-            )
-            if best_pair is None or candidate_key > best_pair[0]:
-                best_pair = (candidate_key, j, metrics, endpoint_match, confidence)
+            candidate_key = (score_with_bonus, -length_delta, right["station_count"])
+            best_key = None if best_pair is None else best_pair[0]
+            if best_pair is None or candidate_key > best_key:
+                best_pair = (candidate_key, j, score_with_bonus)
+                best_score = score_with_bonus
 
         if best_pair is not None:
-            _, j, metrics, endpoint_match, confidence = best_pair
+            _, j, _ = best_pair
             right = evaluated[j]
             pairs.append(
                 {
                     "forward_id": left_id,
                     "reverse_id": right.get("relation_id"),
-                    "shared_stops": metrics["shared_stops"],
-                    "overlap_ratio": metrics["overlap_ratio"],
-                    "forward_coverage": metrics["a_coverage"],
-                    "reverse_coverage": metrics["b_coverage"],
-                    "endpoint_match": endpoint_match,
-                    "confidence": confidence,
-                    # Backward-compatible field; guaranteed <= 1.
-                    "overlap": metrics["overlap_ratio"],
+                    "overlap": best_score,
                 }
             )
             used.add(left_id)
@@ -1585,65 +1158,48 @@ def _classify_against_main(
     item_id = item.get("relation_id")
     main_id = main.get("relation_id")
     if item_id == main_id:
-        return "main", {
-            "shared_stops": item["station_count"],
-            "item_coverage": 1.0,
-            "main_coverage": 1.0,
-            "overlap_ratio": 1.0,
-            "reverse_overlap_ratio": 1.0,
-            "exclusive_stops": 0,
-            "orientation": "same",
-        }
+        return "main", {"common": item["station_count"], "overlap": 1.0, "exclusive": 0}
     if item_id in paired_main_ids:
-        return "main", {
-            "shared_stops": item["station_count"],
-            "item_coverage": 1.0,
-            "main_coverage": 1.0,
-            "overlap_ratio": 1.0,
-            "reverse_overlap_ratio": 1.0,
-            "exclusive_stops": 0,
-            "orientation": "reverse",
-        }
+        return "main", {"common": item["station_count"], "overlap": 1.0, "exclusive": 0}
 
     item_names = _station_name_set(item["records"])
     main_names = _station_name_set(main["records"])
     common_set = item_names & main_names
     exclusive = len(item_names - main_names)
-
-    direct_metrics = _sequence_overlap_metrics(item["records"], main["records"])
-    reverse_metrics = _sequence_overlap_metrics(item["records"], list(reversed(main["records"])))
-    overlap = direct_metrics["overlap_ratio"]
-    reverse_overlap = reverse_metrics["overlap_ratio"]
+    overlap = _sequence_overlap(item["records"], main["records"])
+    reverse_overlap = _reverse_sequence_overlap(item["records"], main["records"])
     common = len(common_set)
 
-    if reverse_overlap > overlap:
-        best_metrics = reverse_metrics
-        orientation = "reverse"
-    else:
-        best_metrics = direct_metrics
-        orientation = "same"
-
-    metrics = {
-        "shared_stops": best_metrics["shared_stops"],
-        "item_coverage": best_metrics["a_coverage"],
-        "main_coverage": best_metrics["b_coverage"],
-        "overlap_ratio": best_metrics["overlap_ratio"],
-        "reverse_overlap_ratio": reverse_overlap,
-        "direct_overlap_ratio": overlap,
-        "exclusive_stops": exclusive,
-        "orientation": orientation,
-    }
-
     if common >= _ROUTE_MASTER_BRANCH_MIN_COMMON and exclusive >= 2 and max(overlap, reverse_overlap) >= 0.40:
-        return "branch", metrics
+        return "branch", {
+            "common": common,
+            "overlap": overlap,
+            "reverse_overlap": reverse_overlap,
+            "exclusive": exclusive,
+        }
 
     if exclusive <= 1 and max(overlap, reverse_overlap) >= _ROUTE_MASTER_PARTIAL_OVERLAP:
-        return "partial", metrics
+        return "partial", {
+            "common": common,
+            "overlap": overlap,
+            "reverse_overlap": reverse_overlap,
+            "exclusive": exclusive,
+        }
 
     if max(overlap, reverse_overlap) >= _ROUTE_MASTER_SEQUENCE_OVERLAP:
-        return "variant", metrics
+        return "variant", {
+            "common": common,
+            "overlap": overlap,
+            "reverse_overlap": reverse_overlap,
+            "exclusive": exclusive,
+        }
 
-    return "unrelated", metrics
+    return "unrelated", {
+        "common": common,
+        "overlap": overlap,
+        "reverse_overlap": reverse_overlap,
+        "exclusive": exclusive,
+    }
 
 
 def _select_main_route(evaluated: Sequence[Dict[str, Any]], official: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1680,46 +1236,22 @@ def _resolve_route_master(
     evaluated: Sequence[Dict[str, Any]],
     official: Sequence[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    """Resolve one logical metro line from multiple OSM route Relations.
-
-    V6.7-2.2.2 adds one conservative step after Main selection: if the selected
-    Main relation declares a terminal in name=/from=/to= but its stop sequence
-    is missing that terminal, recover the missing endpoint only from another
-    same-cohort Relation that directly bridges to the Main endpoint.
-    """
+    """Resolve one logical metro line from multiple OSM route Relations."""
     if not evaluated:
         return None
 
     cohort = _identity_cohort(evaluated)
-    main = dict(_select_main_route(cohort, official))
+    main = _select_main_route(cohort, official)
 
     direction_pairs = _pair_route_directions(cohort)
     paired_main_ids: set[int] = set()
     main_pair = None
-    reverse_main_item: Optional[Dict[str, Any]] = None
     for pair in direction_pairs:
         ids = {pair["forward_id"], pair["reverse_id"]}
         if main.get("relation_id") in ids:
             paired_main_ids.update(ids)
             main_pair = pair
-            for item in cohort:
-                if item.get("relation_id") in ids and item.get("relation_id") != main.get("relation_id"):
-                    reverse_main_item = dict(item)
-                    break
             break
-
-    # V6.7-2.2: complete both directions independently when they have explicit
-    # terminal hints. The Main side becomes the canonical station sequence.
-    completed_main, main_completion = _complete_main_route_endpoints(main, cohort)
-    main = completed_main
-
-    completed_reverse = None
-    reverse_completion = None
-    if reverse_main_item is not None:
-        completed_reverse, reverse_completion = _complete_main_route_endpoints(reverse_main_item, cohort)
-
-    if completed_reverse is not None:
-        main_pair = _rebuild_main_pair_quality(main, completed_reverse)
 
     classifications: List[Dict[str, Any]] = []
     for item in cohort:
@@ -1759,59 +1291,6 @@ def _resolve_route_master(
     if explicit_master_ids:
         master_type = "osm_route_master"
 
-    main_start, main_end = _relation_endpoint_names(main["records"])
-    declared_start, declared_end = _candidate_endpoint_hints(main)
-    main_pair_quality = None
-    if main_pair is not None:
-        main_pair_quality = {
-            "shared_stops": main_pair.get("shared_stops", 0),
-            "overlap_ratio": min(1.0, max(0.0, float(main_pair.get("overlap_ratio", 0.0)))),
-            "forward_coverage": min(1.0, max(0.0, float(main_pair.get("forward_coverage", 0.0)))),
-            "reverse_coverage": min(1.0, max(0.0, float(main_pair.get("reverse_coverage", 0.0)))),
-            "endpoint_match": bool(main_pair.get("endpoint_match", False)),
-            "confidence": min(1.0, max(0.0, float(main_pair.get("confidence", 0.0)))),
-        }
-
-    # Completion metrics are reported in two distinct dimensions:
-    #
-    #   forward_added_stops / reverse_added_stops
-    #       directional work performed on each Main direction;
-    #
-    #   unique_added_stops
-    #       net additions to the canonical Main Station Sequence actually
-    #       exposed by Line.stations.
-    #
-    # Previously ``total_added_stops`` summed both directions, so adding one
-    # missing terminal to each direction produced ``4`` even though the
-    # canonical Main gained only two unique stations. Keep the legacy field as
-    # an alias of the canonical unique count for unambiguous reporting.
-    forward_added_stops = int(main_completion.get("added_count", 0))
-    reverse_added_stops = int((reverse_completion or {}).get("added_count", 0))
-    unique_added_stops = forward_added_stops
-
-    completion_records = {
-        "applied": bool(main_completion.get("applied") or (reverse_completion or {}).get("applied")),
-        "main": main_completion,
-        "reverse": reverse_completion,
-        "forward_added_stops": forward_added_stops,
-        "reverse_added_stops": reverse_added_stops,
-        "directional_added_stops": forward_added_stops + reverse_added_stops,
-        "unique_added_stops": unique_added_stops,
-        # Backward-compatible, but now explicitly canonical/net rather than a
-        # double-counted forward+reverse total.
-        "total_added_stops": unique_added_stops,
-        "confidence": min(
-            1.0,
-            max(
-                0.0,
-                min(
-                    float(main_completion.get("confidence", 0.0)),
-                    float((reverse_completion or {}).get("confidence", main_completion.get("confidence", 0.0))),
-                ),
-            ),
-        ),
-    }
-
     return {
         "type": master_type,
         "identity_key": _line_identity_key(main.get("line_name") or main.get("relation_name") or ""),
@@ -1825,14 +1304,8 @@ def _resolve_route_master(
             "coverage": main["coverage"],
             "matched_count": main["matched_count"],
             "matched_score": main["matched_score"],
-            "start_station": main_start,
-            "end_station": main_end,
-            "declared_start_station": declared_start,
-            "declared_end_station": declared_end,
-            "completion": main_completion,
         },
         "main_pair": main_pair,
-        "main_pair_quality": main_pair_quality,
         "direction_pairs": direction_pairs,
         "branches": [
             {
@@ -1841,7 +1314,6 @@ def _resolve_route_master(
                 "station_count": item["station_count"],
                 "records": item["records"],
                 "reversed": item["reverse"],
-                "metrics": _classify_against_main(item, main, paired_main_ids)[1],
             }
             for item in branch_items
         ],
@@ -1852,7 +1324,6 @@ def _resolve_route_master(
                 "station_count": item["station_count"],
                 "records": item["records"],
                 "reversed": item["reverse"],
-                "metrics": _classify_against_main(item, main, paired_main_ids)[1],
             }
             for item in partial_items
         ],
@@ -1863,42 +1334,14 @@ def _resolve_route_master(
                 "station_count": item["station_count"],
                 "records": item["records"],
                 "reversed": item["reverse"],
-                "metrics": _classify_against_main(item, main, paired_main_ids)[1],
             }
             for item in variant_items
         ],
         "classifications": classifications,
         "cohort_relation_ids": [item["relation_id"] for item in cohort],
         "candidate_relation_ids": [item["relation_id"] for item in evaluated],
-        "excluded_relation_ids": [
-            item["relation_id"]
-            for item in evaluated
-            if item["relation_id"] not in {member["relation_id"] for member in cohort}
-        ],
-        "completion": completion_records,
-        "quality": {
-            "cohort_size": len(cohort),
-            "candidate_size": len(evaluated),
-            "branch_count": len(branch_items),
-            "partial_count": len(partial_items),
-            "variant_count": len(variant_items),
-            "unrelated_count": sum(
-                1 for item in classifications if item["role"] == "unrelated"
-            ),
-            "main_pair_confidence": (
-                main_pair_quality["confidence"] if main_pair_quality else None
-            ),
-            "main_route_completion_applied": completion_records["applied"],
-            "main_route_completion_added_stops": completion_records["unique_added_stops"],
-            "main_route_completion_unique_added_stops": completion_records["unique_added_stops"],
-            "main_route_completion_directional_added_stops": completion_records["directional_added_stops"],
-            "main_route_completion_forward_added_stops": completion_records["forward_added_stops"],
-            "main_route_completion_reverse_added_stops": completion_records["reverse_added_stops"],
-            "main_route_completion_confidence": completion_records["confidence"],
-        },
         "explicit_route_master_ids": list(explicit_master_ids),
     }
-
 
 def _discover_stations_from_relation(
     city_name: str,
@@ -1981,36 +1424,8 @@ def _discover_stations_from_relation(
     best = next(
         item for item in evaluated if item["relation_id"] == main_id
     )
-    best = dict(best)
-    best["records"] = list(route_master["main"].get("records", []) or [])
-    best["station_count"] = len(best["records"])
 
     # 输出候选评分。V6.7-2 额外打印角色，方便全国线路诊断。
-    completion = route_master.get("completion", {}) or {}
-    print("Route Master Main/Pair 质量:")
-    if completion.get("applied"):
-        print(
-            f"  Main 端点补全: +{completion.get('unique_added_stops', completion.get('total_added_stops', 0))} 站 | "
-            f"forward=+{completion.get('forward_added_stops', 0)} | "
-            f"reverse=+{completion.get('reverse_added_stops', 0)} | "
-            f"directional_total={completion.get('directional_added_stops', completion.get('total_added_stops', 0))} | "
-            f"confidence={float(completion.get('confidence', 0.0)):.1%} | "
-            f"declared={route_master['main'].get('declared_start_station', '')} -> "
-            f"{route_master['main'].get('declared_end_station', '')}"
-        )
-    if route_master.get("main_pair_quality"):
-        quality = route_master["main_pair_quality"]
-        print(
-            f"  shared_stops={quality['shared_stops']} | "
-            f"overlap={quality['overlap_ratio']:.1%} | "
-            f"forward_coverage={quality['forward_coverage']:.1%} | "
-            f"reverse_coverage={quality['reverse_coverage']:.1%} | "
-            f"endpoint_match={quality['endpoint_match']} | "
-            f"confidence={quality['confidence']:.1%}"
-        )
-    else:
-        print("  main_pair=None")
-
     print("Relation 候选评分:")
     cohort_ids = set(route_master["cohort_relation_ids"])
     class_map = {
@@ -2073,7 +1488,6 @@ def _discover_stations_from_relation(
         "reversed": best["reverse"],
         "candidate_count": len(candidates),
         "route_master": route_master,
-        "completion": route_master.get("completion"),
     }
 
 
@@ -2174,8 +1588,6 @@ def create_route(
                 line._route_master_type = line._route_master.get("type")
                 line._route_master_main_id = line._route_master.get("main", {}).get("relation_id")
                 line._route_master_main_pair = line._route_master.get("main_pair")
-                line._route_master_main_pair_quality = line._route_master.get("main_pair_quality")
-                line._route_master_quality = line._route_master.get("quality")
                 line._route_master_branch_ids = [
                     item.get("relation_id")
                     for item in line._route_master.get("branches", [])
