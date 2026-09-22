@@ -278,3 +278,123 @@ def test_route_master_endpoint_geometry_completion_uses_recorded_evidence():
     assert enriched["end_relation_id"] == 300
     assert enriched["geometry"][0] == [0.0, 0.0]
     assert enriched["geometry"][-1] == [3.0, 0.0]
+
+
+def test_related_route_geometries_are_kept_separate(monkeypatch):
+    line = SimpleNamespace(
+        city="测试",
+        name="3号线",
+        stations=[
+            _station("A站", 0.0, 0.0),
+            _station("B站", 0.001, 0.0),
+            _station("C站", 0.002, 0.0),
+        ],
+        geometry=[],
+        _route_master_main_id=100,
+        _route_master={
+            "main": {
+                "relation_id": 100,
+                "records": [
+                    {"name": "A站", "point": [0.0, 0.0]},
+                    {"name": "B站", "point": [0.001, 0.0]},
+                    {"name": "C站", "point": [0.002, 0.0]},
+                ],
+            },
+            "branches": [
+                {
+                    "relation_id": 200,
+                    "station_count": 2,
+                    "records": [
+                        {"name": "B站", "point": [0.001, 0.0]},
+                        {"name": "D站", "point": [0.003, 0.0]},
+                    ],
+                    "metrics": {"orientation": "same"},
+                }
+            ],
+            "partials": [
+                {
+                    "relation_id": 300,
+                    "station_count": 2,
+                    "records": [
+                        {"name": "A站", "point": [0.0, 0.0]},
+                        {"name": "B站", "point": [0.001, 0.0]},
+                    ],
+                    "metrics": {"overlap_ratio": 0.5},
+                }
+            ],
+            "variants": [],
+        },
+    )
+
+    main = _candidate(
+        100,
+        [
+            {"id": 1, "name": "A站", "point": [0.0, 0.0]},
+            {"id": 2, "name": "B站", "point": [0.001, 0.0]},
+            {"id": 3, "name": "C站", "point": [0.002, 0.0]},
+        ],
+        [
+            _way(101, [1, 2], [[0.0, 0.0], [0.001, 0.0]]),
+            _way(102, [2, 3], [[0.001, 0.0], [0.002, 0.0]]),
+        ],
+        [101, 102],
+        "测试3号线 主",
+    )
+
+    branch = _candidate(
+        200,
+        [
+            {"id": 2, "name": "B站", "point": [0.001, 0.0]},
+            {"id": 4, "name": "D站", "point": [0.003, 0.0]},
+        ],
+        [
+            _way(201, [2, 4], [[0.001, 0.0], [0.003, 0.0]]),
+        ],
+        [201],
+        "测试3号线 Branch",
+    )
+
+    partial = _candidate(
+        300,
+        [
+            {"id": 1, "name": "A站", "point": [0.0, 0.0]},
+            {"id": 2, "name": "B站", "point": [0.001, 0.0]},
+        ],
+        [
+            _way(301, [1, 2], [[0.0, 0.0], [0.001, 0.0]]),
+        ],
+        [301],
+        "测试3号线 Partial",
+    )
+
+    monkeypatch.setattr(
+        route_builder,
+        "get_line_relation_tracks",
+        lambda *args, **kwargs: {
+            "candidates": [main, branch, partial],
+            "relations": [],
+        },
+    )
+
+    result = route_builder.build_route_geometry(
+        line,
+        (0.0, 0.0, 0.01, 0.01),
+    )
+
+    assert result is line
+    assert result.geometry
+    assert result.geometry_relation_id == 100
+
+    assert len(result.geometry_branches) == 1
+    assert result.geometry_branches[0]["relation_id"] == 200
+    assert result.geometry_branches[0]["role"] == "branches"
+    assert result.geometry_branches[0]["start_station"] == "B站"
+    assert result.geometry_branches[0]["end_station"] == "D站"
+    assert result.geometry_branches[0]["projected_station_count"] == 2
+
+    assert len(result.geometry_partials) == 1
+    assert result.geometry_partials[0]["relation_id"] == 300
+    assert result.geometry_partials[0]["role"] == "partials"
+    assert result.geometry_partials[0]["projected_station_count"] == 2
+
+    assert result.geometry_variants == []

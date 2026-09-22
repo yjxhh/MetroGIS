@@ -1357,6 +1357,111 @@ def _call_get_line_relation_tracks(
         raise last_error
 
 
+def _build_related_route_geometries(
+    line: Any,
+    candidates: Sequence[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Build Geometry for Route Master Branch / Partial / Variant Relations.
+
+    Main Geometry remains the canonical Line.geometry. Related geometries are
+    kept separate so a branch or short-turn Relation cannot accidentally replace
+    the Main route. Each relation is evaluated against its own Route Master
+    station sequence rather than the complete Main station sequence.
+    """
+    master = _get(line, "_route_master", default=None) or {}
+    candidate_map: Dict[Any, Dict[str, Any]] = {}
+
+    for candidate in candidates:
+        relation_id = (candidate.get("relation", {}) or {}).get("id")
+        if relation_id is None:
+            continue
+        candidate_map[relation_id] = candidate
+        try:
+            candidate_map[int(relation_id)] = candidate
+        except (TypeError, ValueError):
+            pass
+
+    results: Dict[str, List[Dict[str, Any]]] = {
+        "branches": [],
+        "partials": [],
+        "variants": [],
+    }
+
+    for role in results:
+        entries = list(master.get(role, []) or [])
+        for entry in entries:
+            relation_id = entry.get("relation_id")
+            candidate = candidate_map.get(relation_id)
+            if candidate is None:
+                try:
+                    candidate = candidate_map.get(int(relation_id))
+                except (TypeError, ValueError):
+                    candidate = None
+
+            if candidate is None:
+                continue
+
+            station_records = list(entry.get("records", []) or [])
+            evaluation = evaluate_relation_candidate(
+                candidate,
+                station_records,
+            )
+            if evaluation is None:
+                continue
+
+            chain = evaluation["chain"]
+            geometry = list(evaluation.get("geometry", []) or [])
+            results[role].append(
+                {
+                    "relation_id": evaluation["relation_id"],
+                    "relation_name": evaluation["relation_name"],
+                    "role": role,
+                    "station_count": entry.get(
+                        "station_count",
+                        len(station_records),
+                    ),
+                    "start_station": (
+                        station_records[0].get("name", "")
+                        if station_records
+                        else ""
+                    ),
+                    "end_station": (
+                        station_records[-1].get("name", "")
+                        if station_records
+                        else ""
+                    ),
+                    "geometry": geometry,
+                    "length": geometry_length(geometry),
+                    "reversed": evaluation.get("reversed", False),
+                    "way_ids": list(chain.get("way_ids", []) or []),
+                    "used_way_count": chain.get("used_way_count", 0),
+                    "total_way_count": chain.get("total_way_count", 0),
+                    "way_chain_connected": chain.get("connected", False),
+                    "way_chain_continuous": chain.get("continuous", False),
+                    "way_coverage": (
+                        chain.get("used_way_count", 0)
+                        / chain.get("total_way_count", 1)
+                        if chain.get("total_way_count", 0)
+                        else 0.0
+                    ),
+                    "projected_station_count": evaluation.get(
+                        "projected_station_count",
+                        0,
+                    ),
+                    "max_snap": evaluation.get("max_snap", 0.0),
+                    "snap_sum": evaluation.get("snap_sum", 0.0),
+                    "station_monotonic_failures": evaluation.get(
+                        "monotonic_failures",
+                        0,
+                    ),
+                    "metrics": dict(entry.get("metrics", {}) or {}),
+                }
+            )
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Public builder
 # ---------------------------------------------------------------------------
@@ -1443,6 +1548,11 @@ def build_relation_route(
         best["geometry"] = completion_geometry["geometry"]
         best["length"] = geometry_length(best["geometry"])
         best["endpoint_completion"] = completion_geometry
+
+    best["related_geometries"] = _build_related_route_geometries(
+        line,
+        candidates,
+    )
 
     print(
         f"选择 Relation {best['relation_id']} | "
@@ -1546,6 +1656,15 @@ def build_route_geometry(
         "geometry_endpoint_completion_end_relation_id": endpoint_completion.get(
             "end_relation_id"
         ),
+        "geometry_branch_count": len(
+            relation_result.get("related_geometries", {}).get("branches", [])
+        ),
+        "geometry_partial_count": len(
+            relation_result.get("related_geometries", {}).get("partials", [])
+        ),
+        "geometry_variant_count": len(
+            relation_result.get("related_geometries", {}).get("variants", [])
+        ),
     }
 
     if geometry:
@@ -1553,6 +1672,18 @@ def build_route_geometry(
         geometry_metadata["geometry_end"] = list(geometry[-1])
 
     for attr, value in geometry_metadata.items():
+        try:
+            setattr(line, attr, value)
+        except Exception:
+            pass
+
+    related_geometries = relation_result.get("related_geometries", {}) or {}
+    for attr, value in (
+        ("geometry_branches", related_geometries.get("branches", [])),
+        ("geometry_partials", related_geometries.get("partials", [])),
+        ("geometry_variants", related_geometries.get("variants", [])),
+        ("geometry_related_routes", related_geometries),
+    ):
         try:
             setattr(line, attr, value)
         except Exception:
