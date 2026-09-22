@@ -16,7 +16,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parent
-V67_FILE = ROOT / "route_builder_V6_7.py"
+V67_FILE = ROOT.parent / "route_builder_V6_7.py"
 
 
 def _load_v67_module():
