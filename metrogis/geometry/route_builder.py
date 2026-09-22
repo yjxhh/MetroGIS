@@ -462,6 +462,7 @@ def build_ordered_relation_chain(
             "used_way_count": 0,
             "total_way_count": 0,
             "connected": False,
+            "continuous": False,
             "length": 0.0,
         }
 
@@ -473,6 +474,7 @@ def build_ordered_relation_chain(
             "used_way_count": 0,
             "total_way_count": len(ways),
             "connected": False,
+            "continuous": False,
             "length": 0.0,
         }
 
@@ -494,6 +496,7 @@ def build_ordered_relation_chain(
             "used_way_count": 0,
             "total_way_count": len(ways),
             "connected": False,
+            "continuous": False,
             "length": 0.0,
         }
 
@@ -602,7 +605,10 @@ def build_ordered_relation_chain(
         "way_ids": ordered_ids,
         "used_way_count": used,
         "total_way_count": total,
+        # connected means every Relation Way member was consumed.
+        # continuous means the selected Way subset itself forms a joined chain.
         "connected": used == total,
+        "continuous": used > 0,
         "length": geometry_length(chain),
     }
 
@@ -1489,7 +1495,16 @@ def build_route_geometry(
 
     # Keep a few optional attributes populated when the Line model permits it.
     relation_chain = relation_result["chain"]
-    geometry_continuous = _geometry_is_continuous(geometry)
+    # OSM geometry vertices within a Way can be sparse, so checking every
+    # vertex distance would incorrectly flag a valid polyline. The Way-chain
+    # builder already enforces exact-node or <=25m joins.
+    geometry_continuous = bool(
+        geometry
+        and relation_chain.get(
+            "continuous",
+            relation_chain.get("connected", False),
+        )
+    )
     projected_count = station_projection.get(
         "projected_count",
         relation_result.get("projected_station_count", 0),
@@ -1509,6 +1524,7 @@ def build_route_geometry(
         # Relation Way members; those remain visible in way coverage.
         "geometry_connected": geometry_continuous,
         "geometry_way_chain_connected": relation_chain.get("connected", False),
+        "geometry_chain_continuous": relation_chain.get("continuous", False),
         "geometry_way_coverage": (
             relation_chain.get("used_way_count", 0) / relation_chain.get("total_way_count", 1)
             if relation_chain.get("total_way_count", 0)
