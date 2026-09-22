@@ -1095,11 +1095,27 @@ def build_route_geometry(
     line.geometry = geometry
 
     # Keep a few optional attributes populated when the Line model permits it.
-    for attr, value in (
-        ("geometry_length", relation_result["length"]),
-        ("route_length", relation_result["length"]),
-        ("relation_id", relation_result["relation_id"]),
-    ):
+    geometry_metadata = {
+        "geometry_length": relation_result["length"],
+        "route_length": relation_result["length"],
+        "geometry_relation_id": relation_result["relation_id"],
+        "geometry_relation_name": relation_result["relation_name"],
+        "geometry_route_master_preferred": relation_result.get("route_master_preferred", False),
+        "geometry_way_ids": list(relation_result["chain"].get("way_ids", []) or []),
+        "geometry_used_way_count": relation_result["chain"].get("used_way_count", 0),
+        "geometry_total_way_count": relation_result["chain"].get("total_way_count", 0),
+        "geometry_connected": relation_result["chain"].get("connected", False),
+        "geometry_projected_station_count": relation_result.get("projected_station_count", 0),
+        "geometry_max_snap": relation_result.get("max_snap", 0.0),
+        "geometry_snap_sum": relation_result.get("snap_sum", 0.0),
+        "geometry_station_monotonic_failures": relation_result.get("monotonic_failures", 0),
+    }
+
+    if geometry:
+        geometry_metadata["geometry_start"] = list(geometry[0])
+        geometry_metadata["geometry_end"] = list(geometry[-1])
+
+    for attr, value in geometry_metadata.items():
         try:
             setattr(line, attr, value)
         except Exception:
