@@ -1255,10 +1255,17 @@ def evaluate_relation_candidate(
     except (TypeError, ValueError):
         start_node_id = None
 
+    next_station_point = (
+        _station_point(route_stations[1])
+        if len(route_stations) >= 2
+        else None
+    )
+
     chain_info = build_ordered_relation_chain(
         candidate,
         start_point=first_station_point,
         start_node_id=start_node_id,
+        next_point=next_station_point,
     )
     geometry = chain_info["geometry"]
     if len(geometry) < 2:
