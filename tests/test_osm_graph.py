@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.integration
+
 from metrogis.api.track import get_track_geometry
 from metrogis.geometry.osm_graph import build_osm_graph
 
