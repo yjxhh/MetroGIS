@@ -1211,47 +1211,69 @@ def evaluate_relation_candidate(
     if len(stops) < 2:
         return None
 
-    # V6.7-3: the completed Route Master station sequence is the geometry
-    # boundary. When an endpoint was added by Route Master completion, start the
-    # Way-chain from that completed endpoint rather than from the first raw
-    # Relation stop.
-    first_station_point = _station_point(route_stations[0]) if route_stations else None
+    # First orient the Relation stop sequence to the target Route Master
+    # station sequence. Geometry is then built from that already-oriented first
+    # stop. This is essential for reverse Relations: otherwise we would anchor
+    # the Way-chain at the correct station and then reverse the whole chain a
+    # second time, often collapsing the result onto a short side segment.
+    oriented_stops, reversed_relation, matched_count, matched_score = (
+        _orient_relation_for_official_stations(
+            stops,
+            stop_nodes,
+            route_stations,
+        )
+    )
 
-    # Related Route Master records are dicts that retain the authoritative OSM
-    # stop id as ``id``. Line.stations created by the parser normally expose
-    # coordinates but do not retain that id. When the geometry stage is given a
-    # Route Master role sequence, prefer that exact OSM node id so the Way-chain
-    # starts from the correct station instead of merely choosing the nearest
-    # geometry Way. This prevents short/disconnected sub-chains from being
-    # selected when a different Way happens to be geographically closer.
-    start_node_id = (
-        _get(
+    # V6.7-3: the completed Route Master station sequence is the geometry
+    # boundary. Prefer the exact OSM node id from the first oriented Relation
+    # stop; fall back to the Route Master station coordinates for endpoint
+    # completion cases where that terminal is absent from Relation stop members.
+    first_station_point = (
+        _station_point(route_stations[0])
+        if route_stations
+        else None
+    )
+    start_node_id: Optional[int] = None
+
+    if oriented_stops:
+        first_oriented_stop = oriented_stops[0]
+        start_node_id = _relation_stop_id(first_oriented_stop)
+        oriented_first_point = _relation_stop_point(
+            first_oriented_stop,
+            stop_nodes,
+        )
+        if oriented_first_point is not None:
+            first_station_point = oriented_first_point
+
+    if start_node_id is None and route_stations:
+        start_node_id = _get(
             route_stations[0],
             "osm_node_id",
             "node_id",
             default=None,
         )
-        if route_stations
-        else None
-    )
 
-    if start_node_id is None and route_stations and isinstance(route_stations[0], dict):
-        start_node_id = _get(route_stations[0], "id", default=None)
+        if start_node_id is None and isinstance(route_stations[0], dict):
+            start_node_id = _get(route_stations[0], "id", default=None)
 
-        # Older Route Master records may keep the OSM stop member under raw.
-        if start_node_id is None:
-            raw_record = _get(route_stations[0], "raw", default=None)
-            if isinstance(raw_record, dict):
-                start_node_id = _get(
-                    raw_record,
-                    "id",
-                    "node_id",
-                    "ref",
-                    default=None,
-                )
+            # Older Route Master records may keep the OSM stop member under raw.
+            if start_node_id is None:
+                raw_record = _get(route_stations[0], "raw", default=None)
+                if isinstance(raw_record, dict):
+                    start_node_id = _get(
+                        raw_record,
+                        "id",
+                        "node_id",
+                        "ref",
+                        default=None,
+                    )
 
     try:
-        start_node_id = int(start_node_id) if start_node_id is not None else None
+        start_node_id = (
+            int(start_node_id)
+            if start_node_id is not None
+            else None
+        )
     except (TypeError, ValueError):
         start_node_id = None
 
@@ -1259,6 +1281,19 @@ def evaluate_relation_candidate(
         _station_point(route_stations[1])
         if len(route_stations) >= 2
         else None
+    )
+    if (
+        next_station_point is None
+        and len(oriented_stops) >= 2
+    ):
+        next_station_point = _relation_stop_point(
+            oriented_stops[1],
+            stop_nodes,
+        )
+
+    chain_anchor_known = (
+        start_node_id is not None
+        or first_station_point is not None
     )
 
     chain_info = build_ordered_relation_chain(
@@ -1271,16 +1306,15 @@ def evaluate_relation_candidate(
     if len(geometry) < 2:
         return None
 
-    oriented_stops, reversed_relation, matched_count, matched_score = _orient_relation_for_official_stations(
-        stops,
-        stop_nodes,
-        route_stations,
+    # build_ordered_relation_chain() is now explicitly anchored to the first
+    # station in the oriented Route Master sequence. Only retain the historical
+    # full reverse fallback when neither an authoritative node id nor a station
+    # coordinate was available to establish that orientation.
+    oriented_geometry = (
+        geometry
+        if chain_anchor_known
+        else (list(reversed(geometry)) if reversed_relation else geometry)
     )
-
-    # The chain itself is constructed from the final station direction. If the
-    # Relation stop sequence is opposite to the final station order, reverse
-    # the resulting geometry as well.
-    oriented_geometry = list(reversed(geometry)) if reversed_relation else geometry
 
     # First prefer the complete Line.stations sequence for slicing and quality
     # checks. Fall back to Relation stops only when the Line stations do not
