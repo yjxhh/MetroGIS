@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.integration
+
 from metrogis.resources.override import (
     get_override_station
 )
