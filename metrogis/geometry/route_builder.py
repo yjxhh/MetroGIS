@@ -399,6 +399,8 @@ def _endpoint_distance(
 def build_ordered_relation_chain(
     candidate: Dict[str, Any],
     connect_tolerance: float = 25.0,
+    start_point: Optional[Tuple[float, float]] = None,
+    start_node_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Reconstruct a single ordered polyline from Relation Ways.
@@ -425,14 +427,17 @@ def build_ordered_relation_chain(
 
     stops = list(candidate.get("stops", []) or [])
     first_stop = stops[0] if stops else None
-    first_stop_id = None
-    if first_stop is not None:
+    first_stop_id = start_node_id
+    if first_stop_id is None and first_stop is not None:
         raw_id = _get(first_stop, "id", "node_id", "ref", default=None)
         try:
             first_stop_id = int(raw_id) if raw_id is not None else None
         except (TypeError, ValueError):
             first_stop_id = None
-    first_stop_point = _station_point(first_stop) if first_stop is not None else None
+
+    first_stop_point = start_point
+    if first_stop_point is None and first_stop is not None:
+        first_stop_point = _station_point(first_stop)
     if first_stop_point is None and first_stop is not None:
         lat = _get(first_stop, "lat", "latitude", default=None)
         lon = _get(first_stop, "lon", "lng", "longitude", default=None)
@@ -701,6 +706,70 @@ def _official_first_last_names(official_stations: Sequence[Any]) -> Tuple[str, s
     return names[0], names[-1]
 
 
+def _station_sequence_positions(
+    stations: Sequence[Any],
+    geometry: Sequence[Sequence[float]],
+) -> Dict[str, Any]:
+    """
+    Project the final Line.stations sequence onto the rebuilt Relation polyline.
+
+    V6.7-3 uses the already-completed station sequence from Route Master as the
+    geometry reference, so endpoint completion is reflected in the final slice
+    instead of silently trimming back to the raw Relation stop sequence.
+    """
+    if not stations or len(geometry) < 2:
+        return {
+            "positions": [],
+            "snap_sum": 0.0,
+            "max_snap": 0.0,
+            "monotonic_failures": 0,
+            "projected_count": 0,
+        }
+
+    positions: List[float] = []
+    snap_sum = 0.0
+    max_snap = 0.0
+    previous_segment = 0
+    monotonic_failures = 0
+
+    for station in stations:
+        point = _station_point(station)
+        if point is None:
+            continue
+
+        position, _, snap, segment_idx, _ = _point_to_polyline(
+            point,
+            geometry,
+            start_segment=previous_segment,
+        )
+
+        if positions and position + 50.0 < positions[-1]:
+            retry_position, _, retry_snap, retry_segment, _ = _point_to_polyline(
+                point,
+                geometry,
+                start_segment=0,
+            )
+            if retry_position >= positions[-1] - 50.0:
+                position = retry_position
+                snap = retry_snap
+                segment_idx = retry_segment
+            else:
+                monotonic_failures += 1
+
+        positions.append(position)
+        previous_segment = max(previous_segment, segment_idx)
+        snap_sum += snap
+        max_snap = max(max_snap, snap)
+
+    return {
+        "positions": positions,
+        "snap_sum": snap_sum,
+        "max_snap": max_snap,
+        "monotonic_failures": monotonic_failures,
+        "projected_count": len(positions),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Relation candidate evaluation / geometry
 # ---------------------------------------------------------------------------
@@ -708,7 +777,7 @@ def _official_first_last_names(official_stations: Sequence[Any]) -> Tuple[str, s
 
 def evaluate_relation_candidate(
     candidate: Dict[str, Any],
-    official_stations: Sequence[Any],
+    route_stations: Sequence[Any],
 ) -> Optional[Dict[str, Any]]:
     relation = candidate.get("relation", {}) or {}
     relation_id = relation.get("id")
@@ -719,7 +788,22 @@ def evaluate_relation_candidate(
     if len(stops) < 2:
         return None
 
-    chain_info = build_ordered_relation_chain(candidate)
+    # V6.7-3: the completed Route Master station sequence is the geometry
+    # boundary. When an endpoint was added by Route Master completion, start the
+    # Way-chain from that completed endpoint rather than from the first raw
+    # Relation stop.
+    first_station_point = _station_point(route_stations[0]) if route_stations else None
+    start_node_id = _get(route_stations[0], "osm_node_id", "node_id", default=None) if route_stations else None
+    try:
+        start_node_id = int(start_node_id) if start_node_id is not None else None
+    except (TypeError, ValueError):
+        start_node_id = None
+
+    chain_info = build_ordered_relation_chain(
+        candidate,
+        start_point=first_station_point,
+        start_node_id=start_node_id,
+    )
     geometry = chain_info["geometry"]
     if len(geometry) < 2:
         return None
@@ -727,60 +811,96 @@ def evaluate_relation_candidate(
     oriented_stops, reversed_relation, matched_count, matched_score = _orient_relation_for_official_stations(
         stops,
         stop_nodes,
-        official_stations,
+        route_stations,
     )
 
-    # The chain itself is constructed in the OSM Relation's stop direction.
-    # If that direction is opposite to official station order, reverse the
-    # resulting geometry as well.
+    # The chain itself is constructed from the final station direction. If the
+    # Relation stop sequence is opposite to the final station order, reverse
+    # the resulting geometry as well.
     oriented_geometry = list(reversed(geometry)) if reversed_relation else geometry
 
-    oriented_stop_points: List[Tuple[float, float]] = []
-    for stop in oriented_stops:
-        point = _relation_stop_point(stop, stop_nodes)
-        if point is not None:
-            oriented_stop_points.append(point)
+    # First prefer the complete Line.stations sequence for slicing and quality
+    # checks. Fall back to Relation stops only when the Line stations do not
+    # carry enough coordinates.
+    station_projection = _station_sequence_positions(
+        route_stations,
+        oriented_geometry,
+    )
 
-    # Verify that the Relation stop sequence actually lies along the rebuilt
-    # polyline. Missing coordinates are tolerated, but excessive off-track
-    # distances make the candidate less trustworthy.
-    max_snap = 0.0
-    snap_sum = 0.0
-    previous_segment = 0
-    monotonic_failures = 0
-    positions: List[float] = []
+    if station_projection["projected_count"] >= 2:
+        route_geometry = oriented_geometry
+        projected_positions = station_projection["positions"]
 
-    for stop_point in oriented_stop_points:
-        position, _, snap, segment_idx, _ = _point_to_polyline(
-            stop_point,
-            oriented_geometry,
-            start_segment=previous_segment,
-        )
-        if positions and position + 50.0 < positions[-1]:
-            # Retry globally before calling it a real sequence failure.
-            position2, _, snap2, segment2, _ = _point_to_polyline(
-                stop_point,
+        # The final station sequence is authoritative. Its first/last
+        # projected positions must delimit the route in the same direction.
+        start_pos = projected_positions[0]
+        end_pos = projected_positions[-1]
+
+        if end_pos < start_pos - 50.0:
+            oriented_geometry = list(reversed(oriented_geometry))
+            station_projection = _station_sequence_positions(
+                route_stations,
                 oriented_geometry,
-                start_segment=0,
             )
-            if position2 >= positions[-1] - 50.0:
-                position = position2
-                snap = snap2
-                segment_idx = segment2
-            else:
-                monotonic_failures += 1
+            projected_positions = station_projection["positions"]
+            start_pos = projected_positions[0] if projected_positions else 0.0
+            end_pos = projected_positions[-1] if projected_positions else 0.0
+            reversed_relation = not reversed_relation
 
-        positions.append(position)
-        previous_segment = max(previous_segment, segment_idx)
-        snap_sum += snap
-        max_snap = max(max_snap, snap)
-
-    route_geometry = oriented_geometry
-    if positions:
-        start_pos = min(positions)
-        end_pos = max(positions)
         if end_pos > start_pos + 1.0:
             route_geometry = _slice_polyline(oriented_geometry, start_pos, end_pos)
+        else:
+            route_geometry = oriented_geometry
+
+        max_snap = station_projection["max_snap"]
+        snap_sum = station_projection["snap_sum"]
+        monotonic_failures = station_projection["monotonic_failures"]
+        projected_count = station_projection["projected_count"]
+    else:
+        oriented_stop_points: List[Tuple[float, float]] = []
+        for stop in oriented_stops:
+            point = _relation_stop_point(stop, stop_nodes)
+            if point is not None:
+                oriented_stop_points.append(point)
+
+        max_snap = 0.0
+        snap_sum = 0.0
+        previous_segment = 0
+        monotonic_failures = 0
+        positions: List[float] = []
+
+        for stop_point in oriented_stop_points:
+            position, _, snap, segment_idx, _ = _point_to_polyline(
+                stop_point,
+                oriented_geometry,
+                start_segment=previous_segment,
+            )
+            if positions and position + 50.0 < positions[-1]:
+                position2, _, snap2, segment2, _ = _point_to_polyline(
+                    stop_point,
+                    oriented_geometry,
+                    start_segment=0,
+                )
+                if position2 >= positions[-1] - 50.0:
+                    position = position2
+                    snap = snap2
+                    segment_idx = segment2
+                else:
+                    monotonic_failures += 1
+
+            positions.append(position)
+            previous_segment = max(previous_segment, segment_idx)
+            snap_sum += snap
+            max_snap = max(max_snap, snap)
+
+        route_geometry = oriented_geometry
+        if positions:
+            start_pos = min(positions)
+            end_pos = max(positions)
+            if end_pos > start_pos + 1.0:
+                route_geometry = _slice_polyline(oriented_geometry, start_pos, end_pos)
+
+        projected_count = len(positions)
 
     route_length = geometry_length(route_geometry)
 
@@ -791,7 +911,8 @@ def evaluate_relation_candidate(
     )
 
     # Score favours Relation completeness and station sequence agreement, not
-    # an external hard-coded line length.
+    # an external hard-coded line length. Route Master preference is applied
+    # later by build_relation_route().
     score = (
         matched_score
         + matched_count * 20.0
@@ -812,6 +933,7 @@ def evaluate_relation_candidate(
         "max_snap": max_snap,
         "snap_sum": snap_sum,
         "monotonic_failures": monotonic_failures,
+        "projected_station_count": projected_count,
         "score": score,
         "stops": oriented_stops,
     }
@@ -883,22 +1005,42 @@ def build_relation_route(
     if not candidates:
         return None
 
-    official_stations = list(_get(line, "stations", default=[]) or [])
+    route_stations = list(_get(line, "stations", default=[]) or [])
+    preferred_relation_id = _get(
+        line,
+        "_route_master_main_id",
+        "_relation_id",
+        default=None,
+    )
+    try:
+        preferred_relation_id = int(preferred_relation_id) if preferred_relation_id is not None else None
+    except (TypeError, ValueError):
+        pass
+
     print(f"Relation 候选: {len(candidates)}")
+    if preferred_relation_id is not None:
+        print(f"Route Master Main Relation: {preferred_relation_id}")
 
     evaluated: List[Dict[str, Any]] = []
     for candidate in candidates:
-        evaluation = evaluate_relation_candidate(candidate, official_stations)
+        evaluation = evaluate_relation_candidate(candidate, route_stations)
         if evaluation is None:
             continue
 
+        evaluation["route_master_preferred"] = (
+            preferred_relation_id is not None
+            and evaluation["relation_id"] == preferred_relation_id
+        )
+
         print(
             f"  Relation {evaluation['relation_id']} | "
+            f"role={'main' if evaluation['route_master_preferred'] else 'candidate'} | "
             f"ways={evaluation['chain']['used_way_count']}/{evaluation['chain']['total_way_count']} | "
             f"stops={len(evaluation['stops'])} | "
-            f"匹配={evaluation['matched_count']}/{len(official_stations) if official_stations else '-'} | "
+            f"匹配={evaluation['matched_count']}/{len(route_stations) if route_stations else '-'} | "
             f"长度={evaluation['length'] / 1000:.3f} km | "
             f"snap_max={evaluation['max_snap']:.1f}m | "
+            f"projected_stations={evaluation.get('projected_station_count', 0)} | "
             f"reverse={evaluation['reversed']}"
         )
         evaluated.append(evaluation)
@@ -908,6 +1050,7 @@ def build_relation_route(
 
     evaluated.sort(
         key=lambda x: (
+            x["route_master_preferred"],
             x["score"],
             x["matched_count"],
             x["chain"]["used_way_count"],
@@ -919,6 +1062,7 @@ def build_relation_route(
     print(
         f"选择 Relation {best['relation_id']} | "
         f"{best['relation_name']} | "
+        f"Route Master Main={best['route_master_preferred']} | "
         f"{best['length'] / 1000:.3f} km"
     )
 
