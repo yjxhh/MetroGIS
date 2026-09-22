@@ -1159,7 +1159,40 @@ def evaluate_relation_candidate(
     # Way-chain from that completed endpoint rather than from the first raw
     # Relation stop.
     first_station_point = _station_point(route_stations[0]) if route_stations else None
-    start_node_id = _get(route_stations[0], "osm_node_id", "node_id", default=None) if route_stations else None
+
+    # Related Route Master records are dicts that retain the authoritative OSM
+    # stop id as ``id``. Line.stations created by the parser normally expose
+    # coordinates but do not retain that id. When the geometry stage is given a
+    # Route Master role sequence, prefer that exact OSM node id so the Way-chain
+    # starts from the correct station instead of merely choosing the nearest
+    # geometry Way. This prevents short/disconnected sub-chains from being
+    # selected when a different Way happens to be geographically closer.
+    start_node_id = (
+        _get(
+            route_stations[0],
+            "osm_node_id",
+            "node_id",
+            default=None,
+        )
+        if route_stations
+        else None
+    )
+
+    if start_node_id is None and route_stations and isinstance(route_stations[0], dict):
+        start_node_id = _get(route_stations[0], "id", default=None)
+
+        # Older Route Master records may keep the OSM stop member under raw.
+        if start_node_id is None:
+            raw_record = _get(route_stations[0], "raw", default=None)
+            if isinstance(raw_record, dict):
+                start_node_id = _get(
+                    raw_record,
+                    "id",
+                    "node_id",
+                    "ref",
+                    default=None,
+                )
+
     try:
         start_node_id = int(start_node_id) if start_node_id is not None else None
     except (TypeError, ValueError):
