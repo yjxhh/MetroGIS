@@ -1499,7 +1499,11 @@ def build_route_geometry(
     # vertex distance would incorrectly flag a valid polyline. The Way-chain
     # builder already enforces exact-node or <=25m joins.
     geometry_continuous = bool(
-        geometry and relation_chain.get("continuous", False)
+        geometry
+        and relation_chain.get(
+            "continuous",
+            relation_chain.get("connected", False),
+        )
     )
     projected_count = station_projection.get(
         "projected_count",
