@@ -1284,6 +1284,11 @@ def evaluate_relation_candidate(
     return {
         "relation_id": relation_id,
         "relation_name": relation_name,
+        # Keep the raw Relation candidate available to the geometry stage.
+        # Route Master endpoint completion stores evidence by Relation ID;
+        # Geometry must be able to retrieve that exact candidate without
+        # re-querying or guessing which Way set produced the evaluation.
+        "candidate": candidate,
         "chain": chain_info,
         "geometry": route_geometry,
         "length": route_length,
