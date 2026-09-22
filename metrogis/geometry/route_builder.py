@@ -19,6 +19,7 @@ from __future__ import annotations
 import inspect
 import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+import re
 
 from pyproj import Geod
 
