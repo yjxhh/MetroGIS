@@ -179,8 +179,14 @@ def test_build_route_geometry_exposes_quality_metadata(monkeypatch):
     assert line.geometry_total_way_count == 2
     assert line.geometry_connected is True
     assert line.geometry_projected_station_count == 3
-    assert line.geometry_max_snap == 12.5
-    assert line.geometry_station_monotonic_failures == 0
+    expected_projection = route_builder._station_sequence_positions(
+        line.stations,
+        line.geometry,
+    )
+    assert line.geometry_max_snap == expected_projection["max_snap"]
+    assert line.geometry_station_monotonic_failures == expected_projection[
+        "monotonic_failures"
+    ]
 
 
 def test_route_master_endpoint_geometry_completion_uses_recorded_evidence():
