@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.integration
+
 from metrogis.parser.route_builder import (
     create_route
 )
@@ -40,7 +44,7 @@ def test_tianjin_line3_route():
     for station in line.stations:
 
         print(
-            station.sequence,
+            station.order,
             station.name,
             station.lat,
             station.lng
