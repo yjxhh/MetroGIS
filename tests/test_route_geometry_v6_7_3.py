@@ -136,3 +136,48 @@ def test_completed_endpoint_is_included_in_geometry():
     assert result["geometry"][0] == [0.0, 0.0]
     assert result["geometry"][-1] == [2.0, 0.0]
     assert result["length"] > 100000.0
+
+
+def test_build_route_geometry_exposes_quality_metadata(monkeypatch):
+    line = _line()
+
+    relation_result = {
+        "relation_id": 100,
+        "relation_name": "测试3号线 主",
+        "route_master_preferred": True,
+        "geometry": [[0.0, 0.0], [1.0, 0.0]],
+        "length": 111000.0,
+        "projected_station_count": 3,
+        "max_snap": 12.5,
+        "snap_sum": 20.0,
+        "monotonic_failures": 0,
+        "chain": {
+            "way_ids": [10, 11],
+            "used_way_count": 2,
+            "total_way_count": 2,
+            "connected": True,
+        },
+    }
+
+    monkeypatch.setattr(
+        route_builder,
+        "build_relation_route",
+        lambda line, bbox: relation_result,
+    )
+
+    result = route_builder.build_route_geometry(
+        line,
+        (0.0, 0.0, 1.0, 1.0),
+    )
+
+    assert result is line
+    assert line.geometry == [[0.0, 0.0], [1.0, 0.0]]
+    assert line.geometry_relation_id == 100
+    assert line.geometry_route_master_preferred is True
+    assert line.geometry_way_ids == [10, 11]
+    assert line.geometry_used_way_count == 2
+    assert line.geometry_total_way_count == 2
+    assert line.geometry_connected is True
+    assert line.geometry_projected_station_count == 3
+    assert line.geometry_max_snap == 12.5
+    assert line.geometry_station_monotonic_failures == 0
