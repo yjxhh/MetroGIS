@@ -77,7 +77,18 @@ def _station_name(station: Any) -> str:
 
 def _station_point(station: Any) -> Optional[Tuple[float, float]]:
     point = _get(station, "point", "geometry", "coordinate", "coordinates")
-    return _as_point(point)
+    parsed = _as_point(point)
+    if parsed is not None:
+        return parsed
+
+    # MetroGIS's current Station models commonly expose lat/lng directly.
+    # Geometry integration must support those objects as well as point-based
+    # records returned by OSM/older code.
+    lat = _get(station, "lat", "latitude", default=None)
+    lng = _get(station, "lng", "lon", "longitude", default=None)
+    if lat is None or lng is None:
+        return None
+    return _as_point([lng, lat])
 
 
 def _line_context(line: Any) -> Tuple[str, str, Optional[str]]:
