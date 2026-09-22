@@ -145,8 +145,8 @@ def test_build_route_geometry_exposes_quality_metadata(monkeypatch):
         "relation_id": 100,
         "relation_name": "测试3号线 主",
         "route_master_preferred": True,
-        "geometry": [[0.0, 0.0], [0.001, 0.0]],
-        "length": 111.0,
+        "geometry": [[0.0, 0.0], [0.0001, 0.0]],
+        "length": 11.1,
         "projected_station_count": 3,
         "max_snap": 12.5,
         "snap_sum": 20.0,
@@ -171,7 +171,7 @@ def test_build_route_geometry_exposes_quality_metadata(monkeypatch):
     )
 
     assert result is line
-    assert line.geometry == [[0.0, 0.0], [0.001, 0.0]]
+    assert line.geometry == [[0.0, 0.0], [0.0001, 0.0]]
     assert line.geometry_relation_id == 100
     assert line.geometry_route_master_preferred is True
     assert line.geometry_way_ids == [10, 11]
