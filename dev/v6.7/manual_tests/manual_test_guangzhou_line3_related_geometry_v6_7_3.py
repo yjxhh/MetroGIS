@@ -98,10 +98,21 @@ def test_guangzhou_line3_v6_7_3_related_geometry_live():
                 f"monotonic_failures={failures}"
             )
 
+            total_way_count = int(item.get("total_way_count", 0) or 0)
+            way_coverage = (
+                way_count / total_way_count
+                if total_way_count
+                else 0.0
+            )
+            max_snap = float(item.get("max_snap", 0.0) or 0.0)
+
             assert geometry and len(geometry) >= 2
             assert way_count > 0
+            assert total_way_count > 0
+            assert way_coverage >= 0.75
             assert projected == station_count
             assert failures == 0
+            assert max_snap <= 2000.0
             assert item.get("length", 0.0) > 100.0
             assert item.get("way_chain_continuous", False) is True
 
