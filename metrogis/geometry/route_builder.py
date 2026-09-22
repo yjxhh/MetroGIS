@@ -1418,12 +1418,35 @@ def build_relation_route(
     )
     best = evaluated[0]
 
+    # V6.7-3: when Route Master completion added one or both terminals, extend
+    # the selected Main geometry with the exact same evidence Relations used by
+    # station completion. This keeps station and geometry evidence aligned.
+    completion_geometry = _apply_route_master_endpoint_geometry_completion(
+        line,
+        best,
+        candidates,
+    )
+    if completion_geometry.get("geometry"):
+        best = dict(best)
+        best["geometry"] = completion_geometry["geometry"]
+        best["length"] = geometry_length(best["geometry"])
+        best["endpoint_completion"] = completion_geometry
+
     print(
         f"选择 Relation {best['relation_id']} | "
         f"{best['relation_name']} | "
         f"Route Master Main={best['route_master_preferred']} | "
         f"{best['length'] / 1000:.3f} km"
     )
+
+    if completion_geometry.get("start_added") or completion_geometry.get("end_added"):
+        print(
+            "  Geometry 端点补全: "
+            f"start={'+' if completion_geometry.get('start_added') else '-'}"
+            f"{completion_geometry.get('start_relation_id') or ''} | "
+            f"end={'+' if completion_geometry.get('end_added') else '-'}"
+            f"{completion_geometry.get('end_relation_id') or ''}"
+        )
 
     return best
 
@@ -1439,24 +1462,68 @@ def build_route_geometry(
         print("Relation 路线重建失败，暂不使用自由图最短路，避免产生错误绕行几何。")
         return line
 
-    geometry = relation_result["geometry"]
+    geometry = [list(point) for point in (relation_result["geometry"] or [])]
+
+    # V6.7-3: endpoint geometry completion can recover coordinates for the two
+    # Route Master-added terminals. Populate those Station objects before the
+    # final station projection pass.
+    endpoint_completion = relation_result.get("endpoint_completion", {}) or {}
+    if line.stations:
+        if endpoint_completion.get("start_point") is not None:
+            _set_station_point(line.stations[0], endpoint_completion["start_point"])
+        if endpoint_completion.get("end_point") is not None:
+            _set_station_point(line.stations[-1], endpoint_completion["end_point"])
+
+    station_projection = _station_sequence_positions(
+        line.stations,
+        geometry,
+    )
+
     line.geometry = geometry
 
     # Keep a few optional attributes populated when the Line model permits it.
+    relation_chain = relation_result["chain"]
+    geometry_continuous = _geometry_is_continuous(geometry)
+    projected_count = station_projection.get(
+        "projected_count",
+        relation_result.get("projected_station_count", 0),
+    )
+
     geometry_metadata = {
-        "geometry_length": relation_result["length"],
-        "route_length": relation_result["length"],
+        "geometry_length": geometry_length(geometry),
+        "route_length": geometry_length(geometry),
         "geometry_relation_id": relation_result["relation_id"],
         "geometry_relation_name": relation_result["relation_name"],
         "geometry_route_master_preferred": relation_result.get("route_master_preferred", False),
-        "geometry_way_ids": list(relation_result["chain"].get("way_ids", []) or []),
-        "geometry_used_way_count": relation_result["chain"].get("used_way_count", 0),
-        "geometry_total_way_count": relation_result["chain"].get("total_way_count", 0),
-        "geometry_connected": relation_result["chain"].get("connected", False),
-        "geometry_projected_station_count": relation_result.get("projected_station_count", 0),
-        "geometry_max_snap": relation_result.get("max_snap", 0.0),
-        "geometry_snap_sum": relation_result.get("snap_sum", 0.0),
-        "geometry_station_monotonic_failures": relation_result.get("monotonic_failures", 0),
+        "geometry_way_ids": list(relation_chain.get("way_ids", []) or []),
+        "geometry_used_way_count": relation_chain.get("used_way_count", 0),
+        "geometry_total_way_count": relation_chain.get("total_way_count", 0),
+        # True means the selected final polyline has no gap larger than the
+        # geometry continuity tolerance. It does not hide unused auxiliary
+        # Relation Way members; those remain visible in way coverage.
+        "geometry_connected": geometry_continuous,
+        "geometry_way_chain_connected": relation_chain.get("connected", False),
+        "geometry_way_coverage": (
+            relation_chain.get("used_way_count", 0) / relation_chain.get("total_way_count", 1)
+            if relation_chain.get("total_way_count", 0)
+            else 0.0
+        ),
+        "geometry_projected_station_count": projected_count,
+        "geometry_max_snap": station_projection.get("max_snap", relation_result.get("max_snap", 0.0)),
+        "geometry_snap_sum": station_projection.get("snap_sum", relation_result.get("snap_sum", 0.0)),
+        "geometry_station_monotonic_failures": station_projection.get(
+            "monotonic_failures",
+            relation_result.get("monotonic_failures", 0),
+        ),
+        "geometry_endpoint_completion_applied": bool(
+            endpoint_completion.get("start_added") or endpoint_completion.get("end_added")
+        ),
+        "geometry_endpoint_completion_start_relation_id": endpoint_completion.get(
+            "start_relation_id"
+        ),
+        "geometry_endpoint_completion_end_relation_id": endpoint_completion.get(
+            "end_relation_id"
+        ),
     }
 
     if geometry:
