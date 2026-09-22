@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.integration
+
 from metrogis.api.overpass import search_metro_line
 
 
