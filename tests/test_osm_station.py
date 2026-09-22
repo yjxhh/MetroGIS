@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.integration
+
 from metrogis.api.station import get_osm_stations
 
 
