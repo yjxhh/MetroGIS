@@ -181,3 +181,94 @@ def test_build_route_geometry_exposes_quality_metadata(monkeypatch):
     assert line.geometry_projected_station_count == 3
     assert line.geometry_max_snap == 12.5
     assert line.geometry_station_monotonic_failures == 0
+
+
+def test_route_master_endpoint_geometry_completion_uses_recorded_evidence():
+    line = SimpleNamespace(
+        city="测试",
+        name="3号线",
+        stations=[
+            SimpleNamespace(name="A站", lng=0.0, lat=0.0, order=0),
+            SimpleNamespace(name="B站", lng=1.0, lat=0.0, order=1),
+            SimpleNamespace(name="C站", lng=2.0, lat=0.0, order=2),
+        ],
+        geometry=[],
+        _route_master={
+            "completion": {
+                "main": {
+                    "added_count": 2,
+                    "declared_start": "A站",
+                    "declared_end": "C站",
+                    "start_evidence_relation_ids": [200],
+                    "end_evidence_relation_ids": [300],
+                }
+            }
+        },
+    )
+
+    main = _candidate(
+        100,
+        [
+            {"id": 11, "name": "B站", "point": [1.0, 0.0]},
+            {"id": 12, "name": "C内侧", "point": [2.0, 0.0]},
+        ],
+        [
+            _way(101, [1, 2], [[1.0, 0.0], [2.0, 0.0]]),
+        ],
+        [101],
+        "测试3号线：B站 → C站",
+    )
+
+    start_evidence = _candidate(
+        200,
+        [
+            {"id": 10, "name": "A站", "point": [0.0, 0.0]},
+            {"id": 11, "name": "B站", "point": [1.0, 0.0]},
+        ],
+        [
+            _way(201, [10, 11], [[0.0, 0.0], [1.0, 0.0]]),
+        ],
+        [201],
+        "测试3号线：A站 → B站",
+    )
+
+    end_evidence = _candidate(
+        300,
+        [
+            {"id": 12, "name": "C内侧", "point": [2.0, 0.0]},
+            {"id": 13, "name": "C站", "point": [3.0, 0.0]},
+        ],
+        [
+            _way(301, [12, 13], [[2.0, 0.0], [3.0, 0.0]]),
+        ],
+        [301],
+        "测试3号线：C内侧 → C站",
+    )
+
+    result = {
+        "relation_id": 100,
+        "relation_name": "测试3号线：A站 → C站",
+        "route_master_preferred": True,
+        "candidate": main,
+        "geometry": [[1.0, 0.0], [2.0, 0.0]],
+        "length": route_builder.geometry_length([[1.0, 0.0], [2.0, 0.0]]),
+        "chain": {
+            "way_ids": [101],
+            "used_way_count": 1,
+            "total_way_count": 1,
+            "connected": True,
+        },
+    }
+
+    enriched = route_builder._apply_route_master_endpoint_geometry_completion(
+        line,
+        result,
+        [main, start_evidence, end_evidence],
+    )
+
+    assert enriched["start_added"] is True
+    assert enriched["end_added"] is True
+    assert enriched["start_relation_id"] == 200
+    assert enriched["end_relation_id"] == 300
+    assert enriched["geometry"][0] == [0.0, 0.0]
+    assert enriched["geometry"][-1] == [3.0, 0.0]
