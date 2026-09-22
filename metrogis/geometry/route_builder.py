@@ -413,6 +413,7 @@ def build_ordered_relation_chain(
     connect_tolerance: float = 25.0,
     start_point: Optional[Tuple[float, float]] = None,
     start_node_id: Optional[int] = None,
+    next_point: Optional[Tuple[float, float]] = None,
 ) -> Dict[str, Any]:
     """
     Reconstruct a single ordered polyline from Relation Ways.
@@ -488,7 +489,63 @@ def build_ordered_relation_chain(
     first_wid = _way_id(first_way)
     assert first_wid is not None
 
-    nodes, geom = _orient_way(first_way, reference_point=first_stop_point)
+    # The first stop node can legitimately lie in the middle of an OSM Way.
+    # In that case simply calling _orient_way(start_node=...) leaves the Way in
+    # its original direction and makes the chain continue from the wrong end.
+    # Start the geometry at the authoritative stop node and choose the side that
+    # actually leads toward the next stop / the remaining Relation Ways.
+    nodes = _way_nodes(first_way)
+    geom = _way_geometry(first_way)
+
+    start_index: Optional[int] = None
+    if start_node_id is not None and start_node_id in nodes:
+        start_index = nodes.index(start_node_id)
+
+    if start_index is not None and 0 < start_index < len(nodes) - 1:
+        forward_nodes = nodes[start_index:]
+        forward_geom = geom[start_index:]
+        reverse_nodes = list(reversed(nodes[: start_index + 1]))
+        reverse_geom = list(reversed(geom[: start_index + 1]))
+
+        def _first_direction_key(
+            oriented_nodes: List[int],
+            oriented_geom: List[List[float]],
+        ) -> Tuple[int, float, int]:
+            endpoint_node = oriented_nodes[-1]
+            has_neighbor = any(
+                endpoint_node in _way_nodes(other_way)
+                for other_way in unused.values()
+            )
+            connectivity_rank = 0 if has_neighbor else 1
+
+            if next_point is not None and oriented_geom:
+                next_distance = point_distance(next_point, oriented_geom[-1])
+            else:
+                next_distance = 0.0
+
+            endpoint_member_index = member_index.get(
+                _way_id(first_way) or -1,
+                10**9,
+            )
+            return connectivity_rank, next_distance, endpoint_member_index
+
+        forward_key = _first_direction_key(forward_nodes, forward_geom)
+        reverse_key = _first_direction_key(reverse_nodes, reverse_geom)
+        if reverse_key < forward_key:
+            nodes, geom = reverse_nodes, reverse_geom
+        else:
+            nodes, geom = forward_nodes, forward_geom
+
+        # The first geometry point is the actual Route Master station position.
+        if first_stop_point is not None and geom:
+            geom[0] = [first_stop_point[0], first_stop_point[1]]
+    else:
+        nodes, geom = _orient_way(
+            first_way,
+            start_node=start_node_id,
+            reference_point=first_stop_point,
+        )
+
     if not nodes or len(geom) < 2:
         return {
             "geometry": [],
