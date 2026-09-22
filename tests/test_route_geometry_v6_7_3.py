@@ -6,11 +6,12 @@ from metrogis.geometry import route_builder
 
 
 def _station(name, lng, lat):
+    # Match the current MetroGIS Station model: coordinates are exposed as
+    # lat/lng fields rather than a dedicated point attribute.
     return SimpleNamespace(
         name=name,
         lng=lng,
         lat=lat,
-        point=[lng, lat],
         order=0,
     )
 
