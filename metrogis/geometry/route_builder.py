@@ -19,6 +19,7 @@ from __future__ import annotations
 import inspect
 import math
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+import re
 
 from pyproj import Geod
 
@@ -717,6 +718,354 @@ def _official_first_last_names(official_stations: Sequence[Any]) -> Tuple[str, s
     return names[0], names[-1]
 
 
+def _normalize_station_key(value: Any) -> str:
+    text = _clean_name(value)
+    return " ".join(text.replace("站", "").split()).casefold()
+
+
+def _candidate_stop_records(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+    stops = list(candidate.get("stops", []) or [])
+    stop_nodes = candidate.get("stop_nodes", {}) or {}
+    records: List[Dict[str, Any]] = []
+    for stop in stops:
+        records.append(
+            {
+                "name": _relation_stop_name(stop, stop_nodes),
+                "point": _relation_stop_point(stop, stop_nodes),
+                "raw": stop,
+            }
+        )
+    return records
+
+
+def _candidate_endpoint_point(
+    candidate: Dict[str, Any],
+    target_name: str,
+) -> Optional[Tuple[float, float]]:
+    target_key = _normalize_station_key(target_name)
+    if not target_key:
+        return None
+    for record in _candidate_stop_records(candidate):
+        if _normalize_station_key(record.get("name", "")) == target_key:
+            point = record.get("point")
+            if point is not None:
+                return point
+    return None
+
+
+def _candidate_declared_endpoints(candidate: Dict[str, Any]) -> Tuple[str, str]:
+    relation = candidate.get("relation", {}) or {}
+    tags = relation.get("tags", {}) or {}
+    from_name = _clean_name(tags.get("from", ""))
+    to_name = _clean_name(tags.get("to", ""))
+    if from_name or to_name:
+        return from_name, to_name
+
+    relation_name = _clean_name(tags.get("name", ""))
+    match = re.search(r"[：:]\s*(.*?)\s*[→-]\s*(.*?)\s*$", relation_name)
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+
+    return "", ""
+
+
+def _orient_extension_chain(
+    candidate: Dict[str, Any],
+    chain_geometry: Sequence[Sequence[float]],
+    target_name: str,
+    anchor_name: str,
+    side: str,
+) -> List[List[float]]:
+    """
+    Orient an endpoint-evidence geometry so its missing terminal is on the
+    requested side and the Main Relation anchor is the opposite boundary.
+
+    Route Master completion intentionally records only the missing terminal name.
+    At geometry time we reuse the same evidence Relation's authoritative Way
+    geometry, then orient it from/to the target using Relation metadata and stop
+    endpoints. No free-graph path is introduced.
+    """
+    geometry = [list(point) for point in chain_geometry]
+    if len(geometry) < 2:
+        return geometry
+
+    declared_from, declared_to = _candidate_declared_endpoints(candidate)
+    first_name = _relation_stop_name(
+        (candidate.get("stops") or [None])[0],
+        candidate.get("stop_nodes", {}) or {},
+    ) if candidate.get("stops") else ""
+    last_name = _relation_stop_name(
+        (candidate.get("stops") or [None])[-1],
+        candidate.get("stop_nodes", {}) or {},
+    ) if candidate.get("stops") else ""
+
+    target_key = _normalize_station_key(target_name)
+    anchor_key = _normalize_station_key(anchor_name)
+
+    # First use Relation from/to because V6.7-2.2.2 can legitimately have the
+    # target terminal declared in metadata while it is absent from stop members.
+    if side == "start":
+        if _normalize_station_key(declared_from) == target_key:
+            return geometry
+        if _normalize_station_key(declared_to) == target_key:
+            return list(reversed(geometry))
+        if _normalize_station_key(last_name) == anchor_key:
+            return geometry
+        if _normalize_station_key(first_name) == anchor_key:
+            return list(reversed(geometry))
+    else:
+        if _normalize_station_key(declared_to) == target_key:
+            return geometry
+        if _normalize_station_key(declared_from) == target_key:
+            return list(reversed(geometry))
+        if _normalize_station_key(first_name) == anchor_key:
+            return geometry
+        if _normalize_station_key(last_name) == anchor_key:
+            return list(reversed(geometry))
+
+    # Final fallback: compare the terminal point with any explicit target stop.
+    target_point = _candidate_endpoint_point(candidate, target_name)
+    if target_point is not None:
+        first_distance = point_distance(target_point, geometry[0])
+        last_distance = point_distance(target_point, geometry[-1])
+        if side == "start":
+            return geometry if first_distance <= last_distance else list(reversed(geometry))
+        return list(reversed(geometry)) if first_distance <= last_distance else geometry
+
+    return geometry
+
+
+def _geometry_is_continuous(
+    geometry: Sequence[Sequence[float]],
+    max_gap: float = 25.0,
+) -> bool:
+    if not geometry or len(geometry) < 2:
+        return False
+    for point_a, point_b in zip(geometry[:-1], geometry[1:]):
+        if point_distance(point_a, point_b) > max_gap:
+            return False
+    return True
+
+
+def _slice_extension_to_anchor(
+    geometry: Sequence[Sequence[float]],
+    anchor_point: Optional[Tuple[float, float]],
+    side: str,
+) -> Tuple[List[List[float]], Optional[Tuple[float, float]]]:
+    """
+    Cut an evidence Relation chain at the Main Relation's observed endpoint.
+
+    Returns the extension polyline and its target-side endpoint. The target-side
+    endpoint is the chain endpoint after orientation, which is used to enrich
+    the missing Route Master station coordinates.
+    """
+    if len(geometry) < 2:
+        return [], None
+
+    oriented = [list(point) for point in geometry]
+    if anchor_point is None:
+        target_point = _as_point(oriented[0] if side == "start" else oriented[-1])
+        return oriented, target_point
+
+    anchor_position, anchor_projection, _, _, _ = _point_to_polyline(
+        anchor_point,
+        oriented,
+    )
+    total = geometry_length(oriented)
+
+    if side == "start":
+        if anchor_position <= 0.0:
+            return [], None
+        extension = _slice_polyline(oriented, 0.0, anchor_position)
+        target_point = _as_point(extension[0]) if extension else None
+    else:
+        if anchor_position >= total:
+            return [], None
+        extension = _slice_polyline(oriented, anchor_position, total)
+        target_point = _as_point(extension[-1]) if extension else None
+
+    return extension, target_point
+
+
+def _set_station_point(
+    station: Any,
+    point: Optional[Sequence[float]],
+) -> None:
+    if point is None:
+        return
+    lon = float(point[0])
+    lat = float(point[1])
+    for attr, value in (
+        ("lng", lon),
+        ("lon", lon),
+        ("longitude", lon),
+        ("lat", lat),
+        ("latitude", lat),
+        ("point", [lon, lat]),
+        ("coordinates", [lon, lat]),
+    ):
+        try:
+            setattr(station, attr, value)
+        except Exception:
+            pass
+
+
+def _route_master_completion(
+    line: Any,
+) -> Dict[str, Any]:
+    master = _get(line, "_route_master", default=None) or {}
+    completion = master.get("completion", {}) or {}
+    return completion
+
+
+def _find_candidate_by_relation_id(
+    candidates: Sequence[Dict[str, Any]],
+    relation_id: Any,
+) -> Optional[Dict[str, Any]]:
+    try:
+        target_id = int(relation_id)
+    except (TypeError, ValueError):
+        target_id = relation_id
+
+    for candidate in candidates:
+        rid = (candidate.get("relation", {}) or {}).get("id")
+        try:
+            rid_normalized = int(rid)
+        except (TypeError, ValueError):
+            rid_normalized = rid
+        if rid_normalized == target_id:
+            return candidate
+    return None
+
+
+def _apply_route_master_endpoint_geometry_completion(
+    line: Any,
+    best: Dict[str, Any],
+    candidates: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Extend Main Relation geometry with the exact Relation evidence used by
+    V6.7-2.2.2 to recover missing terminals.
+
+    This is deliberately conservative:
+    - only the recorded start/end evidence Relation IDs are eligible;
+    - only the segment from the evidence geometry to the Main observed endpoint
+      is copied;
+    - no union of arbitrary cohort Ways is performed.
+    """
+    completion = _route_master_completion(line).get("main", {}) or {}
+    if not completion.get("added_count"):
+        return {
+            "geometry": list(best.get("geometry", []) or []),
+            "start_added": False,
+            "end_added": False,
+            "start_relation_id": None,
+            "end_relation_id": None,
+            "start_point": None,
+            "end_point": None,
+        }
+
+    geometry = [list(point) for point in (best.get("geometry", []) or [])]
+    main_candidate = best.get("_candidate", best.get("candidate", {})) or {}
+    main_records = _candidate_stop_records(main_candidate)
+    if not main_records:
+        return {
+            "geometry": geometry,
+            "start_added": False,
+            "end_added": False,
+            "start_relation_id": None,
+            "end_relation_id": None,
+            "start_point": None,
+            "end_point": None,
+        }
+
+    main_start_point = next(
+        (item["point"] for item in main_records if item.get("point") is not None),
+        None,
+    )
+    main_end_point = next(
+        (item["point"] for item in reversed(main_records) if item.get("point") is not None),
+        None,
+    )
+    main_start_name = main_records[0].get("name", "")
+    main_end_name = main_records[-1].get("name", "")
+
+    metadata = {
+        "geometry": geometry,
+        "start_added": False,
+        "end_added": False,
+        "start_relation_id": None,
+        "end_relation_id": None,
+        "start_point": None,
+        "end_point": None,
+    }
+
+    start_ids = list(completion.get("start_evidence_relation_ids", []) or [])
+    end_ids = list(completion.get("end_evidence_relation_ids", []) or [])
+
+    if start_ids:
+        candidate = _find_candidate_by_relation_id(candidates, start_ids[0])
+        if candidate is not None:
+            chain_info = build_ordered_relation_chain(candidate)
+            chain = _orient_extension_chain(
+                candidate,
+                chain_info.get("geometry", []) or [],
+                completion.get("declared_start", ""),
+                main_start_name,
+                "start",
+            )
+            extension, target_point = _slice_extension_to_anchor(
+                chain,
+                main_start_point,
+                "start",
+            )
+            if len(extension) >= 2 and geometry:
+                metadata["start_added"] = True
+                metadata["start_relation_id"] = start_ids[0]
+                metadata["start_point"] = target_point
+                anchor = extension[-1]
+                if point_distance(anchor, geometry[0]) > 1.0:
+                    extension = extension + [list(geometry[0])]
+                metadata["geometry"] = extension[:-1] + geometry
+            elif len(extension) >= 2 and not geometry:
+                metadata["start_added"] = True
+                metadata["start_relation_id"] = start_ids[0]
+                metadata["start_point"] = target_point
+                metadata["geometry"] = extension
+
+    if end_ids:
+        candidate = _find_candidate_by_relation_id(candidates, end_ids[0])
+        if candidate is not None:
+            chain_info = build_ordered_relation_chain(candidate)
+            chain = _orient_extension_chain(
+                candidate,
+                chain_info.get("geometry", []) or [],
+                completion.get("declared_end", ""),
+                main_end_name,
+                "end",
+            )
+            extension, target_point = _slice_extension_to_anchor(
+                chain,
+                main_end_point,
+                "end",
+            )
+            if len(extension) >= 2 and metadata["geometry"]:
+                metadata["end_added"] = True
+                metadata["end_relation_id"] = end_ids[0]
+                metadata["end_point"] = target_point
+                anchor = extension[0]
+                if point_distance(metadata["geometry"][-1], anchor) > 1.0:
+                    metadata["geometry"].append(list(anchor))
+                metadata["geometry"].extend(extension[1:])
+            elif len(extension) >= 2:
+                metadata["end_added"] = True
+                metadata["end_relation_id"] = end_ids[0]
+                metadata["end_point"] = target_point
+                metadata["geometry"] = extension
+
+    return metadata
+
+
 def _station_sequence_positions(
     stations: Sequence[Any],
     geometry: Sequence[Sequence[float]],
@@ -1070,12 +1419,35 @@ def build_relation_route(
     )
     best = evaluated[0]
 
+    # V6.7-3: when Route Master completion added one or both terminals, extend
+    # the selected Main geometry with the exact same evidence Relations used by
+    # station completion. This keeps station and geometry evidence aligned.
+    completion_geometry = _apply_route_master_endpoint_geometry_completion(
+        line,
+        best,
+        candidates,
+    )
+    if completion_geometry.get("geometry"):
+        best = dict(best)
+        best["geometry"] = completion_geometry["geometry"]
+        best["length"] = geometry_length(best["geometry"])
+        best["endpoint_completion"] = completion_geometry
+
     print(
         f"选择 Relation {best['relation_id']} | "
         f"{best['relation_name']} | "
         f"Route Master Main={best['route_master_preferred']} | "
         f"{best['length'] / 1000:.3f} km"
     )
+
+    if completion_geometry.get("start_added") or completion_geometry.get("end_added"):
+        print(
+            "  Geometry 端点补全: "
+            f"start={'+' if completion_geometry.get('start_added') else '-'}"
+            f"{completion_geometry.get('start_relation_id') or ''} | "
+            f"end={'+' if completion_geometry.get('end_added') else '-'}"
+            f"{completion_geometry.get('end_relation_id') or ''}"
+        )
 
     return best
 
@@ -1091,24 +1463,68 @@ def build_route_geometry(
         print("Relation 路线重建失败，暂不使用自由图最短路，避免产生错误绕行几何。")
         return line
 
-    geometry = relation_result["geometry"]
+    geometry = [list(point) for point in (relation_result["geometry"] or [])]
+
+    # V6.7-3: endpoint geometry completion can recover coordinates for the two
+    # Route Master-added terminals. Populate those Station objects before the
+    # final station projection pass.
+    endpoint_completion = relation_result.get("endpoint_completion", {}) or {}
+    if line.stations:
+        if endpoint_completion.get("start_point") is not None:
+            _set_station_point(line.stations[0], endpoint_completion["start_point"])
+        if endpoint_completion.get("end_point") is not None:
+            _set_station_point(line.stations[-1], endpoint_completion["end_point"])
+
+    station_projection = _station_sequence_positions(
+        line.stations,
+        geometry,
+    )
+
     line.geometry = geometry
 
     # Keep a few optional attributes populated when the Line model permits it.
+    relation_chain = relation_result["chain"]
+    geometry_continuous = _geometry_is_continuous(geometry)
+    projected_count = station_projection.get(
+        "projected_count",
+        relation_result.get("projected_station_count", 0),
+    )
+
     geometry_metadata = {
-        "geometry_length": relation_result["length"],
-        "route_length": relation_result["length"],
+        "geometry_length": geometry_length(geometry),
+        "route_length": geometry_length(geometry),
         "geometry_relation_id": relation_result["relation_id"],
         "geometry_relation_name": relation_result["relation_name"],
         "geometry_route_master_preferred": relation_result.get("route_master_preferred", False),
-        "geometry_way_ids": list(relation_result["chain"].get("way_ids", []) or []),
-        "geometry_used_way_count": relation_result["chain"].get("used_way_count", 0),
-        "geometry_total_way_count": relation_result["chain"].get("total_way_count", 0),
-        "geometry_connected": relation_result["chain"].get("connected", False),
-        "geometry_projected_station_count": relation_result.get("projected_station_count", 0),
-        "geometry_max_snap": relation_result.get("max_snap", 0.0),
-        "geometry_snap_sum": relation_result.get("snap_sum", 0.0),
-        "geometry_station_monotonic_failures": relation_result.get("monotonic_failures", 0),
+        "geometry_way_ids": list(relation_chain.get("way_ids", []) or []),
+        "geometry_used_way_count": relation_chain.get("used_way_count", 0),
+        "geometry_total_way_count": relation_chain.get("total_way_count", 0),
+        # True means the selected final polyline has no gap larger than the
+        # geometry continuity tolerance. It does not hide unused auxiliary
+        # Relation Way members; those remain visible in way coverage.
+        "geometry_connected": geometry_continuous,
+        "geometry_way_chain_connected": relation_chain.get("connected", False),
+        "geometry_way_coverage": (
+            relation_chain.get("used_way_count", 0) / relation_chain.get("total_way_count", 1)
+            if relation_chain.get("total_way_count", 0)
+            else 0.0
+        ),
+        "geometry_projected_station_count": projected_count,
+        "geometry_max_snap": station_projection.get("max_snap", relation_result.get("max_snap", 0.0)),
+        "geometry_snap_sum": station_projection.get("snap_sum", relation_result.get("snap_sum", 0.0)),
+        "geometry_station_monotonic_failures": station_projection.get(
+            "monotonic_failures",
+            relation_result.get("monotonic_failures", 0),
+        ),
+        "geometry_endpoint_completion_applied": bool(
+            endpoint_completion.get("start_added") or endpoint_completion.get("end_added")
+        ),
+        "geometry_endpoint_completion_start_relation_id": endpoint_completion.get(
+            "start_relation_id"
+        ),
+        "geometry_endpoint_completion_end_relation_id": endpoint_completion.get(
+            "end_relation_id"
+        ),
     }
 
     if geometry:
