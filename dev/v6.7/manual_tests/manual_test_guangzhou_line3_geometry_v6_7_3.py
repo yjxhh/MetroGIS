@@ -87,6 +87,18 @@ def test_guangzhou_line3_v6_7_3_geometry_integration():
     print(f"relation id = {geometry_relation_id}")
     print(f"ways = {used_way_count}/{total_way_count}")
     print(f"connected = {connected}")
+    print(
+        f"way-chain connected = "
+        f"{getattr(line, 'geometry_way_chain_connected', False)}"
+    )
+    print(
+        f"way coverage = "
+        f"{getattr(line, 'geometry_way_coverage', 0.0):.1%}"
+    )
+    print(
+        f"endpoint completion = "
+        f"{getattr(line, 'geometry_endpoint_completion_applied', False)}"
+    )
     print(f"geometry points = {len(geometry)}")
     print(f"projected stations = {projected_station_count}/{len(line.stations)}")
     print(f"max station snap = {max_snap:.2f} m")
@@ -98,8 +110,12 @@ def test_guangzhou_line3_v6_7_3_geometry_integration():
 
     assert used_way_count > 0
     assert total_way_count >= used_way_count
+    # A Relation may contain auxiliary/non-primary Way members. The selected
+    # final polyline must be continuous; full Relation Way membership is tracked
+    # separately by geometry_way_chain_connected/geometry_way_coverage.
     assert connected is True
     assert projected_station_count == len(line.stations)
+    assert getattr(line, "geometry_endpoint_completion_applied", False) is True
     assert monotonic_failures == 0
     assert max_snap < 100.0
     assert route_length > 1000.0
