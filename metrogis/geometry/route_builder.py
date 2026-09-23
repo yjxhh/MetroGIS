@@ -1237,13 +1237,36 @@ def evaluate_relation_candidate(
 
     if oriented_stops:
         first_oriented_stop = oriented_stops[0]
-        start_node_id = _relation_stop_id(first_oriented_stop)
-        oriented_first_point = _relation_stop_point(
+
+        # Only replace the authoritative Route Master first-station anchor
+        # when the oriented Relation actually starts at that same station.
+        # Route Master may have conservatively completed a missing terminal;
+        # in that case the first Relation stop is the *next* station and must
+        # not move the geometry anchor away from the completed endpoint.
+        official_first_name = (
+            _station_name(route_stations[0])
+            if route_stations
+            else ""
+        )
+        oriented_first_name = _relation_stop_name(
             first_oriented_stop,
             stop_nodes,
         )
-        if oriented_first_point is not None:
-            first_station_point = oriented_first_point
+        same_first_station = bool(
+            official_first_name
+            and oriented_first_name
+            and _normalize_station_key(official_first_name)
+            == _normalize_station_key(oriented_first_name)
+        )
+
+        if same_first_station:
+            start_node_id = _relation_stop_id(first_oriented_stop)
+            oriented_first_point = _relation_stop_point(
+                first_oriented_stop,
+                stop_nodes,
+            )
+            if oriented_first_point is not None:
+                first_station_point = oriented_first_point
 
     if start_node_id is None and route_stations:
         start_node_id = _get(
