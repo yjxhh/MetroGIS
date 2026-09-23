@@ -62,6 +62,90 @@ def _line():
     )
 
 
+
+def test_related_geometry_chain_prefers_route_master_osm_stop_id():
+    candidate = _candidate(
+        500,
+        [
+            {"id": 1, "name": "A站", "point": [0.0, 0.0]},
+            {"id": 2, "name": "B站", "point": [1.0, 0.0]},
+            {"id": 3, "name": "C站", "point": [2.0, 0.0]},
+        ],
+        [
+            # Correct route starts at OSM stop node 1.
+            _way(10, [1, 2], [[0.0, 0.0], [1.0, 0.0]]),
+            _way(11, [2, 3], [[1.0, 0.0], [2.0, 0.0]]),
+            # This Way is geographically closer to A, but is not connected
+            # through the authoritative OSM stop node id.
+            _way(99, [90, 91], [[0.00001, 0.0], [0.00002, 0.0]]),
+        ],
+        [10, 11, 99],
+        "测试3号线：A站 → C站",
+    )
+
+    route_stations = [
+        {"id": 1, "name": "A站", "point": [0.0, 0.0]},
+        {"id": 2, "name": "B站", "point": [1.0, 0.0]},
+        {"id": 3, "name": "C站", "point": [2.0, 0.0]},
+    ]
+
+    result = route_builder.evaluate_relation_candidate(
+        candidate,
+        route_stations,
+    )
+
+    assert result is not None
+    assert result["chain"]["way_ids"] == [10, 11]
+    assert result["chain"]["used_way_count"] == 2
+    assert result["chain"]["total_way_count"] == 3
+    assert result["chain"]["continuous"] is True
+
+
+def test_first_relation_way_can_start_from_interior_stop_node():
+    candidate = _candidate(
+        510,
+        [
+            {"id": 2, "name": "A站", "point": [0.001, 0.0]},
+            {"id": 3, "name": "B站", "point": [0.002, 0.0]},
+            {"id": 4, "name": "C站", "point": [0.003, 0.0]},
+        ],
+        [
+            # A站 node 2 is an interior node of the first Way.
+            _way(
+                10,
+                [1, 2, 3],
+                [[0.0, 0.0], [0.001, 0.0], [0.002, 0.0]],
+            ),
+            _way(
+                11,
+                [3, 4],
+                [[0.002, 0.0], [0.003, 0.0]],
+            ),
+        ],
+        [10, 11],
+        "测试3号线：A站 → C站",
+    )
+
+    route_stations = [
+        {"id": 2, "name": "A站", "point": [0.001, 0.0]},
+        {"id": 3, "name": "B站", "point": [0.002, 0.0]},
+        {"id": 4, "name": "C站", "point": [0.003, 0.0]},
+    ]
+
+    result = route_builder.evaluate_relation_candidate(
+        candidate,
+        route_stations,
+    )
+
+    assert result is not None
+    assert result["chain"]["way_ids"] == [10, 11]
+    assert result["chain"]["used_way_count"] == 2
+    assert result["chain"]["total_way_count"] == 2
+    assert result["projected_station_count"] == 3
+    assert result["max_snap"] < 1.0
+    assert result["geometry"][0] == [0.001, 0.0]
+    assert result["geometry"][-1] == [0.003, 0.0]
+
 def test_route_master_main_relation_is_preferred(monkeypatch):
     line = _line()
 
